@@ -1,0 +1,340 @@
+<policies>
+    <inbound>
+        <base />
+        <!-- 1. Validate a token issued by Entra for this APIM API, not for the model backend. -->
+        <validate-azure-ad-token tenant-id="{{entra-tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized: invalid or missing bearer token." output-token-variable-name="jwt">
+            <client-application-ids>
+                <application-id>{{approved-client-app-id}}</application-id>
+            </client-application-ids>
+            <audiences>
+                <audience>api://{{apim-api-app-id}}</audience>
+                <audience>{{apim-api-app-id}}</audience>
+            </audiences>
+            <required-claims>
+                <claim name="scp" match="any" separator=" ">
+                    <value>AI.Invoke</value>
+                </claim>
+            </required-claims>
+        </validate-azure-ad-token>
+        <!-- 2. Derive identity keys from JWT -->
+        <set-variable name="userId" value='@{
+            var jwt = (Jwt)context.Variables["jwt"];
+            string oid = jwt.Claims.GetValueOrDefault("oid",  string.Empty);
+            return oid.ToLowerInvariant();
+        }' />
+        <set-variable name="tenantId" value='@{
+            var jwt = (Jwt)context.Variables["jwt"];
+            return jwt.Claims.GetValueOrDefault("tid", "unknown");
+        }' />
+        <set-variable name="appId" value='@{
+            var jwt = (Jwt)context.Variables["jwt"];
+            return jwt.Claims.GetValueOrDefault("azp",
+                   jwt.Claims.GetValueOrDefault("appid",
+                   context.Subscription?.Id ?? "unknown"));
+        }' />
+        <set-variable name="userEmail" value='@{
+    var jwt = (Jwt)context.Variables["jwt"];
+    // v1 tokens: unique_name / upn; v2 tokens: preferred_username
+    return jwt.Claims.GetValueOrDefault("preferred_username",
+           jwt.Claims.GetValueOrDefault("upn",
+           jwt.Claims.GetValueOrDefault("unique_name",
+           jwt.Claims.GetValueOrDefault("email", "")))).ToLowerInvariant();
+}' />
+    <set-variable name="userName" value='@{
+    var jwt = (Jwt)context.Variables["jwt"];
+    return jwt.Claims.GetValueOrDefault("name", "");
+}' />
+        <choose>
+            <when condition='@(string.IsNullOrEmpty((string)context.Variables["userId"]) || string.IsNullOrEmpty((string)context.Variables["userEmail"]))'>
+                <return-response>
+                    <set-status code="403" reason="A delegated user identity with email is required" />
+                </return-response>
+            </when>
+        </choose>
+        <set-variable name="callerKey" value='@("email:" + (string)context.Variables["userEmail"])' />
+        <set-variable name="requestBody" value='@{
+    try {
+        var body = context.Request.Body.As&lt;string&gt;(preserveContent: true);
+        JObject.Parse(body);
+        return body;
+    } catch { return ""; }
+}' />
+        <choose>
+            <when condition='@(string.IsNullOrEmpty((string)context.Variables["requestBody"]))'>
+                <return-response>
+                    <set-status code="400" reason="A JSON request body is required" />
+                </return-response>
+            </when>
+        </choose>
+        <set-variable name="deploymentName" value='@{
+            var routeDeployment = context.Request.MatchedParameters.GetValueOrDefault("deployment-id", "");
+            if (!string.IsNullOrEmpty(routeDeployment)) {
+                return routeDeployment;
+            }
+            try {
+                var body = JObject.Parse((string)context.Variables["requestBody"]);
+                return (string)body["model"] ?? "unknown";
+            } catch {
+                return "unknown";
+            }
+        }' />
+        <choose>
+            <when condition='@((string)context.Variables["deploymentName"] == "unknown")'>
+                <return-response>
+                    <set-status code="400" reason="A model is required" />
+                    <set-body>{"error":"model_required"}</set-body>
+                </return-response>
+            </when>
+        </choose>
+        <!-- 4a. Per-minute TOKEN limit per app -->
+        <llm-token-limit counter-key='@((string)context.Variables["appId"])' tokens-per-minute="10000" estimate-prompt-tokens="true" tokens-consumed-header-name="x-tokens-consumed-app" remaining-tokens-header-name="x-tokens-remaining-app" />
+        <!-- 4b. Per-minute TOKEN limit per user -->
+        <llm-token-limit counter-key='@((string)context.Variables["userId"])' tokens-per-minute="500" estimate-prompt-tokens="true" tokens-consumed-header-name="x-tokens-consumed-user" remaining-tokens-header-name="x-tokens-remaining-user" />
+        <!-- 4c. Monthly CALL quota per user -->
+        <quota-by-key calls="500000" renewal-period="2592000" counter-key='@("calls-mo-" + (string)context.Variables["userId"])' />
+        <!-- 4d. Monthly CALL quota per app -->
+        <quota-by-key calls="5000000" renewal-period="2592000" counter-key='@("calls-mo-app-" + (string)context.Variables["appId"])' />
+        <!-- 4e. Reserve from one monthly USD budget per caller across every model.
+             The cost authority owns the price catalog and atomically reserves the
+             worst-case request cost. It must be idempotent on operationId. -->
+        <send-request mode="new" response-variable-name="costReservationResponse" timeout="5" ignore-error="true">
+            <set-url>{{cost-enforcement-url}}/v1/reservations</set-url>
+            <set-method>POST</set-method>
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+            </set-header>
+            <set-body>@{
+                return new JObject(
+                    new JProperty("operationId", context.RequestId.ToString()),
+                    new JProperty("callerKey", (string)context.Variables["callerKey"]),
+                    new JProperty("appId", (string)context.Variables["appId"]),
+                    new JProperty("deployment", (string)context.Variables["deploymentName"]),
+                    new JProperty("period", "Monthly"),
+                    new JProperty("currency", "USD"),
+                    new JProperty("request", JObject.Parse((string)context.Variables["requestBody"]))
+                ).ToString();
+            }</set-body>
+            <authentication-managed-identity resource="{{cost-enforcement-app-id}}" />
+        </send-request>
+        <choose>
+            <when condition='@{
+                var r = context.Variables.GetValueOrDefault&lt;IResponse&gt;("costReservationResponse");
+                return r == null || r.StatusCode != 200;
+            }'>
+                <return-response>
+                    <set-status code="503" reason="Cost enforcement unavailable" />
+                    <set-header name="Retry-After" exists-action="override"><value>5</value></set-header>
+                    <set-body>{"error":"cost_enforcement_unavailable"}</set-body>
+                </return-response>
+            </when>
+            <when condition='@{
+                var r = context.Variables.GetValueOrDefault&lt;IResponse&gt;("costReservationResponse");
+                try {
+                    var b = r.Body.As&lt;JObject&gt;(preserveContent: true);
+                    return (bool?)b["allowed"] != true || string.IsNullOrEmpty((string)b["reservationId"]);
+                } catch { return true; }
+            }'>
+                <return-response>
+                    <set-status code="403" reason="Monthly cost budget exceeded" />
+                    <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+                    <set-body>{"error":"cost_budget_exceeded"}</set-body>
+                </return-response>
+            </when>
+        </choose>
+        <set-variable name="costReservationId" value='@{
+            var r = (IResponse)context.Variables["costReservationResponse"];
+            return (string)r.Body.As&lt;JObject&gt;(preserveContent: true)["reservationId"];
+        }' />
+        <!-- 5. Token metrics to App Insights -->
+        <llm-emit-token-metric namespace="LLM">
+            <dimension name="API" value="@(context.Api.Name)" />
+            <dimension name="Operation" value="@(context.Operation.Name)" />
+            <dimension name="Deployment" value='@((string)context.Variables["deploymentName"])' />
+            <dimension name="AppId" value='@((string)context.Variables["appId"])' />
+            <!-- UserId and TenantId intentionally removed to keep metric cardinality bounded
+            <dimension name="UserId" value="@((string)context.Variables["userId"])" />
+            <dimension name="TenantId" value="@((string)context.Variables["tenantId"])" />
+            -->
+            <dimension name="Subscription" value='@(context.Subscription?.Id ?? "none")' />
+        </llm-emit-token-metric>
+        <!-- 6. Default (primary) backend + track which one served this request -->
+        <set-variable name="activeBackend" value="primary" />
+        <!-- Replaces the caller's token with an APIM managed-identity token. -->
+        <authentication-managed-identity resource="https://ai.azure.com" />
+        <set-backend-service backend-id="global-policy-foundry-demo-ai-endpoint" />
+    </inbound>
+    <backend>
+        <!--
+            Retry logic:
+              - Run forward-request once.
+              - If response is 429 (rate-limited) or 503 (unavailable), switch
+                the backend to the fallback and forward again.
+              - count="1" => at most one retry (2 total attempts).
+              - first-fast-retry="true" => retry with no delay on first failure.
+              - buffer-request-body="true" is REQUIRED so we can re-send the body.
+        -->
+        <retry condition="@(context.Response != null &amp;&amp; (context.Response.StatusCode == 429 || context.Response.StatusCode == 503))" count="1" interval="0" first-fast-retry="true">
+            <choose>
+                <!-- On retry attempts, swap to the fallback backend -->
+                <when condition="@(context.Response != null &amp;&amp; (context.Response.StatusCode == 429 || context.Response.StatusCode == 503))">
+                    <set-variable name="activeBackend" value="fallback" />
+                    <set-backend-service backend-id="global-policy-foundry-demo-ai-endpoint" />
+                </when>
+            </choose>
+            <forward-request buffer-request-body="true" />
+        </retry>
+    </backend>
+    <outbound>
+        <base />
+        <!-- Path B: emit a per-request record with identity + real token usage.
+     Lands in Application Insights `traces` (LA table: AppTraces). -->
+        <set-variable name="promptTokens" value='@{
+    try {
+        var b = context.Response?.Body?.As&lt;JObject&gt;(preserveContent: true);
+        return ((int?)b?["usage"]?["prompt_tokens"]
+             ?? (int?)b?["usage"]?["input_tokens"]
+             ?? 0);
+    } catch { return 0; }
+}' />
+    <set-variable name="completionTokens" value='@{
+    try {
+    var b = context.Response?.Body?.As&lt;JObject&gt;(preserveContent: true);
+        return ((int?)b?["usage"]?["completion_tokens"]
+             ?? (int?)b?["usage"]?["output_tokens"]
+             ?? 0);
+    } catch { return 0; }
+}' />
+    <set-variable name="totalTokens" value='@{
+    try {
+    var b = context.Response?.Body?.As&lt;JObject&gt;(preserveContent: true);
+        return ((int?)b?["usage"]?["total_tokens"] ?? 0);
+    } catch { return 0; }
+}' />
+    <set-variable name="cacheWriteTokens" value='@{
+    try {
+    var b = context.Response?.Body?.As&lt;JObject&gt;(preserveContent: true);
+        return ((int?)b?["usage"]?["cache_creation_input_tokens"]
+             ?? (int?)b?["usage"]?["cache_write_input_tokens"]
+             ?? (int?)b?["usage"]?["prompt_tokens_details"]?["cache_write_tokens"]
+             ?? (int?)b?["usage"]?["input_tokens_details"]?["cache_write_tokens"]
+             ?? 0);
+    } catch { return 0; }
+}' />
+    <set-variable name="cacheReadTokens" value='@{
+    try {
+    var b = context.Response?.Body?.As&lt;JObject&gt;(preserveContent: true);
+        return ((int?)b?["usage"]?["cache_read_input_tokens"]
+             ?? (int?)b?["usage"]?["prompt_tokens_details"]?["cached_tokens"]
+             ?? (int?)b?["usage"]?["input_tokens_details"]?["cached_tokens"]
+             ?? 0);
+    } catch { return 0; }
+}' />
+    <set-variable name="inputTokens" value='@{
+    try {
+        var b = context.Response?.Body?.As&lt;JObject&gt;(preserveContent: true);
+        var usage = b?["usage"];
+        var rawInput = ((int?)usage?["prompt_tokens"] ?? (int?)usage?["input_tokens"] ?? 0);
+        if (usage?["cache_creation_input_tokens"] != null || usage?["cache_read_input_tokens"] != null) {
+            return rawInput;
+        }
+        var cacheWrite = (int)context.Variables["cacheWriteTokens"];
+        var cacheRead = (int)context.Variables["cacheReadTokens"];
+        return Math.Max(0, rawInput - cacheWrite - cacheRead);
+    } catch { return 0; }
+}' />
+    <set-variable name="modelName" value='@{
+    try {
+    var b = context.Response?.Body?.As&lt;JObject&gt;(preserveContent: true);
+        return (string)b?["model"]
+            ?? (string)context.Variables["deploymentName"];
+    } catch {
+        return (string)context.Variables["deploymentName"];
+    }
+}' />
+        <!-- Settle the reservation using actual usage. The authority calculates
+             cost from its deployment/model/version price catalog. An unsettled
+             reservation remains charged at its reserved maximum. -->
+        <send-request mode="new" response-variable-name="costSettlementResponse" timeout="5" ignore-error="true">
+            <set-url>@("{{cost-enforcement-url}}/v1/reservations/" + (string)context.Variables["costReservationId"] + "/settle")</set-url>
+            <set-method>POST</set-method>
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+            </set-header>
+            <set-body>@{
+                return new JObject(
+                    new JProperty("operationId", context.RequestId.ToString()),
+                    new JProperty("deployment", (string)context.Variables["deploymentName"]),
+                    new JProperty("model", (string)context.Variables["modelName"]),
+                    new JProperty("inputTokens", (int)context.Variables["inputTokens"]),
+                    new JProperty("cacheWriteTokens", (int)context.Variables["cacheWriteTokens"]),
+                    new JProperty("cacheReadTokens", (int)context.Variables["cacheReadTokens"]),
+                    new JProperty("outputTokens", (int)context.Variables["completionTokens"]),
+                    new JProperty("status", context.Response.StatusCode)
+                ).ToString();
+            }</set-body>
+            <authentication-managed-identity resource="{{cost-enforcement-app-id}}" />
+        </send-request>
+        <trace source="llm-usage" severity="information">
+            <message>llm-request</message>
+            <metadata name="correlationId" value="@(context.RequestId.ToString())" />
+            <metadata name="userId" value='@((string)context.Variables["userId"])' />
+            <metadata name="appId" value='@((string)context.Variables["appId"])' />
+            <metadata name="tenantId" value='@((string)context.Variables["tenantId"])' />
+            <metadata name="apiName" value="@(context.Api.Name)" />
+            <metadata name="userEmail" value='@((string)context.Variables["userEmail"])' />
+            <metadata name="userName" value='@((string)context.Variables["userName"])' />
+            <metadata name="operationName" value="@(context.Operation.Name)" />
+            <metadata name="deployment" value='@((string)context.Variables["deploymentName"])' />
+            <metadata name="model" value='@((string)context.Variables["modelName"])' />
+            <metadata name="status" value='@(context.Response?.StatusCode.ToString() ?? "0")' />
+            <metadata name="promptTokens" value='@(((int)context.Variables["promptTokens"]).ToString())' />
+            <metadata name="inputTokens" value='@(((int)context.Variables["inputTokens"]).ToString())' />
+            <metadata name="completionTokens" value='@(((int)context.Variables["completionTokens"]).ToString())' />
+            <metadata name="cacheWriteTokens" value='@(((int)context.Variables["cacheWriteTokens"]).ToString())' />
+            <metadata name="cacheReadTokens" value='@(((int)context.Variables["cacheReadTokens"]).ToString())' />
+            <metadata name="totalTokens" value='@(((int)context.Variables["totalTokens"]).ToString())' />
+            <metadata name="servedBy" value='@((string)context.Variables.GetValueOrDefault("activeBackend","primary"))' />
+        </trace>
+        <set-header name="x-user-id" exists-action="override">
+            <value>@((string)context.Variables["userId"])</value>
+        </set-header>
+        <set-header name="x-app-id" exists-action="override">
+            <value>@((string)context.Variables["appId"])</value>
+        </set-header>
+        <!-- Debug: which backend actually served this response -->
+        <set-header name="x-served-by" exists-action="override">
+            <value>@((string)context.Variables["activeBackend"])</value>
+        </set-header>
+    </outbound>
+    <on-error>
+        <base />
+        <choose>
+            <when condition='@(context.LastError.Source == "llm-token-limit"
+                            || context.LastError.Source == "quota-by-key")'>
+                <return-response>
+                    <set-status code="429" reason="Too Many Requests" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("error", "rate_limit_or_quota_exceeded"),
+                            new JProperty("source", context.LastError.Source),
+                            new JProperty("userId", context.Variables.GetValueOrDefault("userId","")),
+                            new JProperty("appId",  context.Variables.GetValueOrDefault("appId",""))
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </when>
+            <when condition='@(context.LastError.Source == "llm-content-safety")'>
+                <return-response>
+                    <set-status code="400" reason="Blocked by content safety" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>{"error":"content_safety_violation"}</set-body>
+                </return-response>
+            </when>
+        </choose>
+    </on-error>
+</policies>

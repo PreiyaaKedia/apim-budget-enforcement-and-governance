@@ -1,0 +1,20 @@
+[
+  {
+    "id": "claude-opus-5",
+    "deployment": "claude-opus-5",
+    "model": "*",
+    "modelVersion": "*",
+    "region": "global",
+    "deploymentType": "GlobalStandard",
+    "currency": "USD",
+    "unit": "usdPerMillionTokens",
+    "inputUsdPerMillion": "5",
+    "cacheWriteUsdPerMillion": "6.25",
+    "cacheReadUsdPerMillion": "0.5",
+    "outputUsdPerMillion": "25",
+    "maxOutputTokens": 32768,
+    "effectiveFrom": "2026-09-01T00:00:00+00:00",
+    "effectiveTo": null,
+    "source": "Replace with the provider pricing URL and verification date"
+  }
+]

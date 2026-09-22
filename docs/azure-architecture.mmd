@@ -1,0 +1,91 @@
+flowchart LR
+    subgraph Consumers["Consumers"]
+        User["User"]
+        Client["Client application"]
+        Admin["Budget administrator"]
+        AdminUI["Local admin console"]
+        User --> Client
+        Admin --> AdminUI
+    end
+
+    subgraph Identity["Microsoft Entra ID"]
+        ClientApp["Client app registration"]
+        GatewayApp["APIM API app registration<br/>AI.Invoke delegated scope"]
+        ApimMI["APIM managed identity"]
+        CostApiApp["Cost API app registration<br/>application ID URI and audience"]
+    end
+
+    subgraph Gateway["Azure API Management - AI gateway"]
+        Api["OpenAI-compatible API"]
+        Policy["Inbound, backend, and outbound policy"]
+        Backend["Foundry backend entity"]
+        NamedValues["Named values"]
+        Api --> Policy --> Backend
+        NamedValues -.-> Policy
+    end
+
+    subgraph Foundry["Microsoft Foundry"]
+        Project["Foundry project and AI Services account"]
+        Anthropic["Anthropic model deployment"]
+        Project --> Anthropic
+    end
+
+    subgraph CostPlane["Cost enforcement resource group"]
+        ACR["Azure Container Registry"]
+        PullMI["User-assigned identity<br/>AcrPull"]
+
+        subgraph VNet["Virtual network"]
+            subgraph ACAEnv["External Container Apps environment<br/>delegated infrastructure subnet"]
+                CostAPI["FastAPI cost enforcement<br/>Container App"]
+                CostMI["System-assigned identity"]
+            end
+
+            subgraph PESubnet["Private endpoint subnet"]
+                PE["Cosmos DB private endpoint"]
+            end
+
+            PrivateDNS["Private DNS zone<br/>privatelink.documents.azure.com"]
+        end
+
+        subgraph Cosmos["Azure Cosmos DB for NoSQL<br/>public access disabled and local auth disabled"]
+            Ledger[("ledger container<br/>budgets and reservations")]
+            Pricing[("pricing container<br/>effective-dated model rates")]
+        end
+
+        ACR -->|Container image| CostAPI
+        PullMI -.->|Pull identity| ACR
+        CostMI -.-> CostAPI
+        CostAPI -->|Private DNS and private IP| PE
+        PrivateDNS -.-> PE
+        PE --> Ledger
+        PE --> Pricing
+    end
+
+    subgraph Observability["Observability"]
+        AppInsights["Workspace-based Application Insights"]
+        LogAnalytics["Log Analytics workspace"]
+        AppInsights --> LogAnalytics
+    end
+
+    Client -->|1. Entra bearer token| Api
+    ClientApp -.->|Requests AI.Invoke| GatewayApp
+    GatewayApp -.->|Token audience and scope| Policy
+    Policy -->|2. Reserve worst-case cost<br/>managed identity token| CostAPI
+    ApimMI -.->|Allowed client| CostApiApp
+    CostApiApp -.->|Token audience| CostAPI
+    Backend -->|3. Managed identity token| Anthropic
+    Anthropic -->|4. Response and actual usage| Policy
+    Policy -->|5. Settle actual cost| CostAPI
+    Policy ==>|6. Metrics, traces, and diagnostics| AppInsights
+    AdminUI -->|Admin key over HTTPS<br/>budgets and prices| CostAPI
+
+    classDef identity fill:#f3e8ff,stroke:#7e22ce,color:#3b0764;
+    classDef gateway fill:#dbeafe,stroke:#1d4ed8,color:#172554;
+    classDef compute fill:#dcfce7,stroke:#15803d,color:#14532d;
+    classDef data fill:#ffedd5,stroke:#c2410c,color:#7c2d12;
+    classDef observe fill:#fef9c3,stroke:#a16207,color:#713f12;
+    class ClientApp,GatewayApp,ApimMI,CostApiApp identity;
+    class Api,Policy,Backend,NamedValues gateway;
+    class Project,Anthropic,ACR,PullMI,CostAPI,CostMI,PE,PrivateDNS compute;
+    class Ledger,Pricing data;
+    class AppInsights,LogAnalytics observe;

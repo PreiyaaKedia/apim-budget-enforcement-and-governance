@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cost Budget Lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">ADMIN CONSOLE</p>
+      <h1>Cost Budget Control</h1>
+    </div>
+    <div class="status" id="backend-status"><span></span><b id="backend-label">Checking backend</b></div>
+  </header>
+
+  <main>
+    <section class="account-strip">
+      <div class="field account-field">
+        <label for="user-select">User email</label>
+        <select id="user-select"></select>
+      </div>
+      <div class="metric"><span>Monthly limit</span><strong id="limit-metric">$0.00</strong></div>
+      <div class="metric"><span>Spent</span><strong id="spent-metric">$0.00</strong></div>
+      <div class="metric accent"><span>Remaining</span><strong id="remaining-metric">$0.00</strong></div>
+      <button class="icon-button" id="reset-budget" title="Reset this user's spend" aria-label="Reset this user's spend">↻</button>
+    </section>
+
+    <div class="workspace-grid">
+      <section class="panel scenario-panel" id="scenario-panel">
+        <div class="section-heading">
+          <div><p class="step">01 / VERIFY</p><h2>Enforcement check</h2></div>
+          <span class="model-badge" id="rate-preview">Select a model</span>
+        </div>
+        <form id="scenario-form">
+          <div id="live-probe-fields" hidden>
+            <div class="field wide">
+              <label for="probe-amount">Reservation amount to test (USD)</label>
+              <input id="probe-amount" type="number" min="0.000001" step="0.000001" value="0.01">
+            </div>
+            <p class="field-note">Checks the real Cosmos ledger, then immediately releases an allowed reservation. No model is called.</p>
+          </div>
+          <div id="simulation-fields">
+            <div class="field wide"><label for="deployment">Model deployment</label><select id="deployment" required></select></div>
+            <div class="token-grid">
+              <div class="field"><label for="input-tokens">Input</label><input id="input-tokens" type="number" min="0" value="1200" required></div>
+              <div class="field"><label for="cache-write-tokens">Cache write</label><input id="cache-write-tokens" type="number" min="0" value="0" required></div>
+              <div class="field"><label for="cache-read-tokens">Cache read</label><input id="cache-read-tokens" type="number" min="0" value="0" required></div>
+              <div class="field"><label for="output-tokens">Actual output</label><input id="output-tokens" type="number" min="0" value="400" required></div>
+            </div>
+            <div class="field range-field">
+              <div class="range-label"><label for="max-output-tokens">Reserved max output</label><output id="max-output-value">4,096</output></div>
+              <input id="max-output-tokens" type="range" min="1" max="32768" step="1" value="4096">
+            </div>
+          </div>
+          <button class="primary-button" type="submit"><span id="check-button-label">Run budget check</span><b>→</b></button>
+        </form>
+
+        <div class="decision empty" id="decision">
+          <div class="decision-mark">?</div>
+          <div><p id="decision-label">Ready to simulate</p><span id="decision-copy">Reserve conservatively, then settle against actual token usage.</span></div>
+        </div>
+        <div class="cost-breakdown">
+          <div><span>Tested reserve</span><strong id="reserved-result">—</strong></div>
+          <div><span>Actual charge</span><strong id="actual-result">—</strong></div>
+          <div><span>Released</span><strong id="released-result">—</strong></div>
+          <div><span>Remaining</span><strong id="remaining-result">—</strong></div>
+        </div>
+      </section>
+
+      <aside class="side-stack">
+        <section class="panel compact-panel">
+          <div class="section-heading"><div><p class="step">02 / BUDGETS</p><h2>Budget policy</h2></div></div>
+          <form id="default-budget-form" class="default-budget-form" hidden>
+            <div class="field money-input"><label for="default-budget-limit">Default monthly USD</label><span>$</span><input id="default-budget-limit" type="number" min="0.000001" step="0.000001" required></div>
+            <button class="secondary-button" type="submit">Set default</button>
+          </form>
+          <form id="budget-form" class="inline-form">
+            <div class="field"><label for="budget-user">User email override</label><input id="budget-user" type="email" placeholder="alex@contoso.com" required></div>
+            <div class="field money-input"><label for="budget-limit">Monthly USD</label><span>$</span><input id="budget-limit" type="number" min="0.000001" step="0.000001" value="1.00" required></div>
+            <button class="secondary-button" type="submit">Save budget</button>
+          </form>
+          <div class="account-list" id="account-list"></div>
+        </section>
+
+        <section class="panel compact-panel" id="pricing-panel">
+          <div class="section-heading">
+            <div><p class="step">03 / PRICING</p><h2>Model catalog</h2></div>
+            <button class="text-button" id="new-price" type="button">+ Add model</button>
+          </div>
+          <div class="price-list" id="price-list"></div>
+        </section>
+      </aside>
+    </div>
+
+    <section class="history-section" id="history-section">
+      <div class="section-heading"><div><p class="step">RECENT RUNS</p><h2>Decision ledger</h2></div><span id="run-count">0 scenarios</span></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Decision</th><th>User</th><th>Model</th><th>Token mix</th><th>Reserve</th><th>Actual</th><th>Remaining</th></tr></thead><tbody id="history-body"></tbody></table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="price-dialog">
+    <form id="price-form">
+      <div class="dialog-heading"><div><p class="step">MODEL RATE CARD</p><h2>Add or edit pricing</h2></div><button class="icon-button" id="close-dialog" type="button" aria-label="Close">×</button></div>
+      <div class="field wide"><label for="price-deployment">Deployment name</label><input id="price-deployment" required></div>
+      <div class="price-grid">
+        <div class="field"><label for="price-input">Input / 1M</label><input id="price-input" type="number" min="0" step="0.000001" required></div>
+        <div class="field"><label for="price-cache-write">Cache write / 1M</label><input id="price-cache-write" type="number" min="0" step="0.000001" required></div>
+        <div class="field"><label for="price-cache-read">Cache read / 1M</label><input id="price-cache-read" type="number" min="0" step="0.000001" required></div>
+        <div class="field"><label for="price-output">Output / 1M</label><input id="price-output" type="number" min="0" step="0.000001" required></div>
+      </div>
+      <div class="field wide"><label for="price-max-output">Provider max output tokens</label><input id="price-max-output" type="number" min="1" value="32768" required></div>
+      <div class="dialog-actions"><button class="secondary-button danger" id="delete-price" type="button">Delete</button><button class="primary-button" type="submit"><span>Save rate card</span><b>→</b></button></div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>
