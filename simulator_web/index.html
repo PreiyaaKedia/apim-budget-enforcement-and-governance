@@ -19,6 +19,11 @@
   </header>
 
   <main>
+    <nav class="view-tabs" id="view-tabs" aria-label="Admin views" hidden>
+      <button type="button" class="active" data-view="overview">Overview</button>
+      <button type="button" data-view="metrics">Budget metrics</button>
+      <button type="button" data-view="dashboard">FinOps dashboard</button>
+    </nav>
     <section class="account-strip">
       <div class="field account-field">
         <label for="user-select">User email</label>
@@ -30,7 +35,7 @@
       <button class="icon-button" id="reset-budget" title="Reset this user's spend" aria-label="Reset this user's spend">↻</button>
     </section>
 
-    <div class="workspace-grid">
+    <div class="workspace-grid" id="overview-view">
       <section class="panel scenario-panel" id="scenario-panel">
         <div class="section-heading">
           <div><p class="step">01 / VERIFY</p><h2>Enforcement check</h2></div>
@@ -79,6 +84,13 @@
             <div class="field money-input"><label for="default-budget-limit">Default monthly USD</label><span>$</span><input id="default-budget-limit" type="number" min="0.000001" step="0.000001" required></div>
             <button class="secondary-button" type="submit">Set default</button>
           </form>
+          <form id="team-budget-form" class="team-budget-form" hidden>
+            <div class="field"><label for="team-role">Team app role</label><input id="team-role" placeholder="Team.Engineering" pattern="[A-Za-z0-9._-]+" required></div>
+            <div class="field money-input"><label for="team-user-limit">Per-user monthly USD</label><span>$</span><input id="team-user-limit" type="number" min="0.000001" step="0.000001" value="100.00" required></div>
+            <button class="secondary-button" type="submit">Save team policy</button>
+          </form>
+          <p class="field-note" id="team-budget-note" hidden>Every caller assigned to this app role receives an independent monthly allowance.</p>
+          <div class="team-list" id="team-list" hidden></div>
           <form id="budget-form" class="inline-form">
             <div class="field"><label for="budget-user">User email override</label><input id="budget-user" type="email" placeholder="alex@contoso.com" required></div>
             <div class="field money-input"><label for="budget-limit">Monthly USD</label><span>$</span><input id="budget-limit" type="number" min="0.000001" step="0.000001" value="1.00" required></div>
@@ -102,6 +114,120 @@
       <div class="table-wrap">
         <table><thead><tr><th>Decision</th><th>User</th><th>Model</th><th>Token mix</th><th>Reserve</th><th>Actual</th><th>Remaining</th></tr></thead><tbody id="history-body"></tbody></table>
       </div>
+    </section>
+
+    <section class="metrics-view" id="metrics-view" hidden>
+      <div class="metrics-heading">
+        <div><p class="step">CURRENT PERIOD</p><h2>Budget metrics</h2></div>
+        <span id="metrics-period">—</span>
+      </div>
+      <div class="metrics-summary">
+        <div><span>Allocated</span><strong id="metrics-allocated">$0.000000</strong></div>
+        <div><span>Spent</span><strong id="metrics-spent">$0.000000</strong></div>
+        <div><span>Reserved</span><strong id="metrics-reserved">$0.000000</strong></div>
+        <div class="remaining"><span>Remaining</span><strong id="metrics-remaining">$0.000000</strong></div>
+      </div>
+
+      <section class="metrics-panel">
+        <div class="section-heading">
+          <div><p class="step">TEAM VIEW</p><h2>Team rollup</h2></div>
+          <span>Active users have invoked through APIM this month.</span>
+        </div>
+        <div class="table-wrap">
+          <table><thead><tr><th>Team role</th><th>Active users</th><th>Allocated</th><th>Spent</th><th>Reserved</th><th>Remaining</th></tr></thead><tbody id="team-metrics-body"></tbody></table>
+        </div>
+      </section>
+
+      <section class="metrics-panel">
+        <div class="section-heading"><div><p class="step">USER VIEW</p><h2>User detail</h2></div></div>
+        <div class="table-wrap">
+          <table class="user-metrics-table"><thead><tr><th>User</th><th>Team role</th><th>Allocated</th><th>Spent</th><th>Reserved</th><th>Remaining</th></tr></thead><tbody id="user-metrics-body"></tbody></table>
+        </div>
+      </section>
+    </section>
+
+    <section class="dashboard-view" id="dashboard-view" hidden>
+      <div class="dashboard-heading">
+        <div><p class="step">ANALYTICAL PLANE</p><h2>Model economics</h2></div>
+        <form class="dashboard-filters" id="dashboard-filters">
+          <div class="field"><label for="analytics-days">Period</label><select id="analytics-days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></div>
+          <div class="field"><label for="analytics-team">Team</label><select id="analytics-team"><option value="">All teams</option></select></div>
+          <div class="field"><label for="analytics-app">Application</label><select id="analytics-app"><option value="">All applications</option></select></div>
+          <div class="field"><label for="analytics-model">Model</label><select id="analytics-model"><option value="">All models</option></select></div>
+          <button class="icon-button analytics-refresh" type="submit" title="Refresh analytics" aria-label="Refresh analytics">↻</button>
+        </form>
+      </div>
+
+      <div class="analytics-notice" id="analytics-notice" hidden></div>
+      <nav class="dashboard-tabs" id="dashboard-tabs" aria-label="FinOps dashboard views">
+        <button type="button" class="active" data-dashboard-tab="summary">Overview</button>
+        <button type="button" data-dashboard-tab="allocation">Allocation</button>
+        <button type="button" data-dashboard-tab="models">Models</button>
+        <button type="button" data-dashboard-tab="performance">Performance</button>
+        <button type="button" data-dashboard-tab="users">Users</button>
+      </nav>
+
+      <div class="analytics-summary" id="analytics-summary">
+        <div><span>Model spend</span><strong id="analytics-spend">$0.000000</strong></div>
+        <div><span>Requests</span><strong id="analytics-requests">0</strong></div>
+        <div><span>Total tokens</span><strong id="analytics-tokens">0</strong></div>
+        <div><span>P95 latency</span><strong id="analytics-p95">0 ms</strong></div>
+        <div><span>Error rate</span><strong id="analytics-error-rate">0%</strong></div>
+        <div><span>Cache read rate</span><strong id="analytics-cache-rate">0%</strong></div>
+      </div>
+
+      <section class="dashboard-pane" data-dashboard-pane="summary">
+        <div class="analytics-grid overview-analytics-grid">
+          <section class="analytics-panel">
+            <div class="section-heading"><div><p class="step">SPEND VELOCITY</p><h2>Daily model spend</h2></div><span id="trend-total"></span></div>
+            <div class="vertical-chart" id="spend-trend"></div>
+          </section>
+          <section class="analytics-panel">
+            <div class="section-heading"><div><p class="step">COST DRIVERS</p><h2>Highest-spend models</h2></div></div>
+            <div class="rank-list" id="model-rank"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="dashboard-pane" data-dashboard-pane="allocation" hidden>
+        <div class="analytics-grid">
+          <section class="analytics-panel">
+            <div class="section-heading"><div><p class="step">TEAM ALLOCATION</p><h2>Consumption by team</h2></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Team</th><th>Requests</th><th>Tokens</th><th>Spend</th><th>P95</th></tr></thead><tbody id="analytics-team-body"></tbody></table></div>
+          </section>
+          <section class="analytics-panel">
+            <div class="section-heading"><div><p class="step">APPLICATION ALLOCATION</p><h2>Consumption by app</h2></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Application</th><th>Requests</th><th>Tokens</th><th>Spend</th><th>Error rate</th></tr></thead><tbody id="analytics-app-body"></tbody></table></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="dashboard-pane" data-dashboard-pane="models" hidden>
+        <section class="analytics-panel">
+          <div class="section-heading"><div><p class="step">TOKEN ECONOMICS</p><h2>Model token distribution</h2></div><span>Input, output, cache write, and cache read share</span></div>
+          <div class="token-distribution" id="model-token-distribution"></div>
+        </section>
+      </section>
+
+      <section class="dashboard-pane" data-dashboard-pane="performance" hidden>
+        <div class="analytics-grid performance-grid">
+          <section class="analytics-panel">
+            <div class="section-heading"><div><p class="step">REQUEST LATENCY</p><h2>Latency distribution</h2></div><span id="average-latency"></span></div>
+            <div class="horizontal-chart" id="latency-distribution"></div>
+          </section>
+          <section class="analytics-panel">
+            <div class="section-heading"><div><p class="step">MODEL PERFORMANCE</p><h2>Cost and responsiveness</h2></div></div>
+            <div class="table-wrap"><table><thead><tr><th>Model</th><th>Avg latency</th><th>P95</th><th>Error</th><th>Spend</th></tr></thead><tbody id="model-performance-body"></tbody></table></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="dashboard-pane" data-dashboard-pane="users" hidden>
+        <section class="analytics-panel">
+          <div class="section-heading"><div><p class="step">UNIT ECONOMICS</p><h2>User consumption detail</h2></div></div>
+          <div class="table-wrap"><table class="analytics-user-table"><thead><tr><th>User</th><th>Team</th><th>Application</th><th>Requests</th><th>Tokens</th><th>Spend</th><th>P95</th></tr></thead><tbody id="analytics-user-body"></tbody></table></div>
+        </section>
+      </section>
     </section>
   </main>
 

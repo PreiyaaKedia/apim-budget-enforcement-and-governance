@@ -77,14 +77,19 @@ The editable, presentation-sized source is in [`docs/azure-architecture.mmd`](do
 
 ## Cosmos containers
 
-- `ledger`, partitioned by `/partitionKey`: a caller and UTC month. Its budget and reservations share one logical partition for transactional batches.
+- `ledger`, partitioned by `/partitionKey`: team policy documents use the `settings` partition; each user budget and its reservations use `user:<tenant-id>:<object-id>:YYYY-MM`. Budget checks and reservations therefore remain transactional per user.
 - `pricing`, partitioned by `/deployment`: effective-dated model prices. Overlapping or missing active records fail closed.
+
+A third container for "available budget" is intentionally not used. Available spend is derived as `limitUsd - spentUsd - reservedUsd` from the user-month budget document. Storing it separately would duplicate mutable financial state and prevent the budget update plus reservation from being one Cosmos transactional batch.
 
 ## API
 
 - `POST /v1/reservations`: reserves a conservative maximum request cost.
 - `POST /v1/reservations/{id}/settle`: atomically replaces reserved cost with actual cost.
 - `POST /v1/reservations/{id}/release`: releases a failed request without charging it.
+- `GET|PUT /v1/admin/budget/teams/{teamRole}`: reads or sets a team's per-user monthly allowance.
+- `GET /v1/admin/budget/teams`: lists team policies for the admin UI.
+- `GET /v1/admin/budget/metrics`: returns current-month team rollups and user-level allocated, spent, reserved, and remaining amounts.
 - `GET /health`: unauthenticated liveness check.
 
 All mutation endpoints require an Entra bearer token for `AUDIENCE` whose `azp` or `appid` equals `ALLOWED_CLIENT_ID`.
@@ -147,8 +152,10 @@ This design uses two app registrations and one caller app. None requires a clien
 3. Record its **Application (client) ID** as `$gatewayApiAppId`.
 4. Open **Expose an API**, set the Application ID URI to `api://<gateway-api-app-id>`, and record it as `$gatewayAudience`.
 5. Add a delegated scope named `AI.Invoke`. Allow admins and users to consent according to your tenant policy.
+6. Under **App roles**, add each budget team as a `Users/Groups` role, such as `Team.Engineering`, `Team.SCM`, and `Team.Marketing`.
+7. In the gateway API's **Enterprise application**, assign each user or security group to exactly one of those team roles.
 
-The policy validates both the audience and the `AI.Invoke` scope.
+The policy validates the audience and `AI.Invoke` scope, then requires exactly one configured team role. A user assigned to no team or multiple budget teams is denied because the charge target would be ambiguous.
 
 #### 3b. Caller registration
 
@@ -272,7 +279,7 @@ Use the imported operation's **Test** tab to confirm the exact URL. APIM portal-
 
 ### 6. Add APIM named values and apply the policy
 
-Create these named values under **APIM > Named values**. Mark secrets as secret; the five values below are identifiers or URLs, not credentials.
+Create these named values under **APIM > Named values**. Mark secrets as secret; the values below are identifiers, role names, or URLs, not credentials.
 
 | Name | Value |
 | --- | --- |
@@ -281,6 +288,7 @@ Create these named values under **APIM > Named values**. Mark secrets as secret;
 | `apim-api-app-id` | Gateway API registration Application ID |
 | `cost-enforcement-url` | `$costApiUrl` without a trailing slash |
 | `cost-enforcement-app-id` | Exact `$costApiAudience` requested by APIM managed identity |
+| `team-app-roles` | Comma-separated role values, for example `Team.Engineering,Team.SCM,Team.Marketing` |
 
 Then:
 
@@ -289,25 +297,36 @@ Then:
 3. Keep the generated Foundry backend ID and managed-identity authentication aligned with Step 5.
 4. Save and use **Calculate effective policy** to confirm no product or global policy unexpectedly overrides this API.
 
-The supplied policy requires a delegated user email claim and constructs `callerKey` as `email:<lowercase-email>`. For production, prefer an immutable Entra object ID and maintain an identity-to-display-name mapping.
+The supplied policy resolves exactly one allowed team role and constructs both `callerKey` and `userKey` as `user:<tenant-id>:<object-id>`. The cost API uses `teamRole` to load the per-user allowance, then reserves against that user's independent monthly partition. Email and display name remain attribution fields rather than budget keys.
+
+The request decision is:
+
+1. APIM validates tenant, audience, approved client, and delegated `AI.Invoke` scope.
+2. APIM resolves exactly one role listed in the `team-app-roles` named value.
+3. APIM sends the immutable user key, resolved team role, deployment, and request body to the cost API.
+4. The cost API loads the team policy. A missing policy fails closed with `403`.
+5. The cost API estimates worst-case cost and atomically compares it with that user's `limitUsd - spentUsd - reservedUsd`.
+6. APIM calls Foundry only when the reservation succeeds, then settles actual usage against the same user reservation.
 
 ### 7. Configure Application Insights and Log Analytics
 
-Two configurations are required:
+The FinOps dashboard reads the APIM Application Insights integration. This keeps high-volume analytical telemetry out of the transactional Cosmos ledger. Policy metadata comes from `traces`, and request latency is correlated from `requests` by operation ID.
 
-1. Under **APIM > Monitoring > Diagnostic settings**, send gateway/resource logs to the Log Analytics workspace.
-2. Create an APIM **Application Insights logger**, then enable that logger in the imported API's diagnostic settings with verbosity **Information** or lower.
+Two manual configurations are required:
 
-The second step is what allows the policy's `<trace source="llm-usage">` records to reach `AppTraces`. Do not log bearer tokens, prompts, responses, admin keys, or other secrets.
+1. Create or select a workspace-based Application Insights resource linked to the intended Log Analytics workspace.
+2. Create an APIM Application Insights logger and enable it on the imported API at 100% sampling with verbosity **Information** or lower. The policy's `<trace source="llm-usage">` metadata is written to `traces.customDimensions`.
+
+Do not log bearer tokens, prompts, responses, admin keys, or other secrets. These APIM changes are intentionally manual; repository automation does not modify gateway diagnostics. APIM resource logs remain an optional fallback when `LOG_ANALYTICS_WORKSPACE_ID` is configured without an Application Insights resource ID.
 
 Verify telemetry after a test call:
 
 ```kusto
-AppTraces
-| where TimeGenerated > ago(30m)
-| where Message == "llm-request"
-| project TimeGenerated, OperationId, Properties
-| order by TimeGenerated desc
+traces
+| where timestamp > ago(30m)
+| where message == "llm-request"
+| project timestamp, operation_Id, customDimensions
+| order by timestamp desc
 ```
 
 ### 8. Add model prices and budgets
@@ -320,6 +339,11 @@ $env:COST_ENFORCEMENT_URL = $costApiUrl
 $env:ADMIN_API_KEY = [System.IO.File]::ReadAllText(
 	(Resolve-Path .\cost-enforcement-api\.local\admin-key)
 ).Trim()
+$env:APPLICATION_INSIGHTS_RESOURCE_ID = az monitor app-insights component show `
+	--resource-group '<monitoring-resource-group>' `
+	--app '<application-insights-name>' `
+	--query id `
+	--output tsv
 Set-Location .\cost-enforcement-api
 python -m uvicorn local_simulator:app --host 127.0.0.1 --port 8010
 ```
@@ -329,8 +353,23 @@ Open `http://127.0.0.1:8010` and confirm the header says **Real enforcement**.
 1. Add a rate card whose deployment name exactly matches the Foundry deployment alias.
 2. Enter authoritative uncached input, cache-write, cache-read, and output rates per million tokens.
 3. Set the provider's maximum output-token value; this controls worst-case reservation size.
-4. Set the default monthly budget.
-5. Add email-specific overrides where required.
+4. In **Budget policy**, enter the exact Entra app-role value and its per-user monthly allowance.
+5. Save the policy. No member list or member count is required; APIM resolves the caller's role and the cost API creates that user's monthly ledger lazily on the first request.
+
+For example:
+
+```powershell
+$headers = @{ 'X-Admin-Key' = $env:ADMIN_API_KEY }
+$body = @{ perUserLimitUsd = '10.00' } | ConvertTo-Json
+Invoke-RestMethod `
+	-Method Put `
+	-Uri "$costApiUrl/v1/admin/budget/teams/Team.Engineering" `
+	-Headers $headers `
+	-ContentType 'application/json' `
+	-Body $body
+```
+
+For reporting, the APIM `llm-usage` trace emits `teamRole`, immutable `userKey`, token usage, settled `actualUsd`, and `remainingBudgetUsd` to Azure Monitor. Reporting does not participate in enforcement.
 
 The admin key remains in the Python server process. Never put it in JavaScript, source control, screenshots, or APIM named values.
 
@@ -374,13 +413,14 @@ Expected checks:
 | --- | --- |
 | Valid caller, known price, sufficient budget | `200`; response includes model output and usage |
 | Missing or invalid caller token | `401` |
-| Token lacks `AI.Invoke`, approved client, or user email | `401` or `403` depending on the failed validation stage |
+| Token lacks `AI.Invoke`, approved client, user identity, or an allowed team role | `401` or `403` depending on the failed validation stage |
+| Token contains multiple configured team roles | `403 ambiguous_team_role` |
 | Unknown deployment or missing active price | Request fails closed before inference |
 | Monthly budget cannot cover the reservation | `403 cost_budget_exceeded` |
 | Token/call allocation exceeded | `429` |
 | Cost API unavailable | `503 cost_enforcement_unavailable` |
 
-For the budget test, lower only your test user's override below the displayed worst-case reservation, make one call, confirm `403`, and restore the intended override. Check the APIM trace, Container App logs, Cosmos ledger through the admin UI, and `AppTraces` after the successful call.
+For the budget test, lower only the test team's allocation below the displayed worst-case reservation, make one call, confirm `403`, and restore the intended allocation. Check the APIM trace, Container App logs, Cosmos ledger, and `AppTraces` after the successful call.
 
 ### 10. Production checklist
 
@@ -421,10 +461,15 @@ $env:COST_ENFORCEMENT_URL = 'https://<cost-api>.<region>.azurecontainerapps.io'
 $env:ADMIN_API_KEY = [System.IO.File]::ReadAllText(
 	(Resolve-Path .\cost-enforcement-api\.local\admin-key)
 ).Trim()
+$env:APPLICATION_INSIGHTS_RESOURCE_ID = '<application-insights-resource-id>'
 Set-Location .\cost-enforcement-api
 python -m uvicorn local_simulator:app --host 127.0.0.1 --port 8010
 ```
 
-Open `http://127.0.0.1:8010` and verify the header says **Real enforcement**. The default applies immediately to users without overrides. Email-specific limits preserve current spend and take precedence over the default. The enforcement probe uses the production Cosmos reservation path and immediately releases allowed reservations, so it validates allow/deny behavior without model inference or added spend.
+Open `http://127.0.0.1:8010` and verify the header says **Real enforcement**. The live budget panel manages team policies, not individual overrides. Every user assigned to a role receives that role's allowance in a separate monthly ledger; one member exhausting their allowance does not consume another member's allowance.
 
-APIM must construct `callerKey` as `email:<normalized-email>` from a validated `preferred_username`, `upn`, `unique_name`, or `email` claim for these overrides to match real model calls. Email is convenient for this prototype but mutable; production systems should maintain an email-to-object-ID mapping and use the immutable Entra object ID as the ledger key.
+Use the **Budget metrics** view for the current-month team rollup and user detail. Team allocation is the sum of instantiated user ledgers, and active users are callers who have invoked through APIM during the month. The view does not synchronize or infer total Entra role membership.
+
+Use the **FinOps dashboard** for time-series and dimensional analysis from APIM telemetry. Its nested views cover spend velocity, team/application allocation, model token mix, latency distribution, errors, cache efficiency, and user-level consumption. An empty or inaccessible workspace is shown as a telemetry status, not as authoritative zero usage. The signed-in local identity needs Log Analytics Reader access to the workspace.
+
+Do not give the global admin key to team owners. Expose team reports through an Entra-authenticated dashboard that authorizes an owner only for their team.

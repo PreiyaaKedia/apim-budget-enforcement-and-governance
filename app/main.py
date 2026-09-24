@@ -13,6 +13,7 @@ from fastapi.responses import Response
 from app.auth import EntraAuthMiddleware
 from app.catalog import AmbiguousPriceError, PriceCatalog, PriceNotFoundError, rates_from_price
 from app.models import (
+    BudgetMetricsResponse,
     BudgetResponse,
     BudgetProbeRequest,
     BudgetProbeResponse,
@@ -23,10 +24,17 @@ from app.models import (
     ReservationResponse,
     SettlementRequest,
     SettlementResponse,
+    TeamBudgetResponse,
+    TeamBudgetUpdate,
     UserBudgetUpdate,
 )
 from app.pricing import TokenUsage, calculate_cost_usd, calculate_reservation_usd
-from app.repository import CosmosLedger, LedgerConflictError, ReservationNotFoundError
+from app.repository import (
+    CosmosLedger,
+    LedgerConflictError,
+    ReservationNotFoundError,
+    TeamBudgetNotFoundError,
+)
 
 
 def create_app() -> FastAPI:
@@ -66,6 +74,31 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="email path and body must match")
         try:
             return ledger.set_budget_limit(_email_caller_key(email), update.limit_usd)
+        except LedgerConflictError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @api.get("/v1/admin/budget/teams/{team_role}", response_model=TeamBudgetResponse, response_model_by_alias=True)
+    def get_team_budget(team_role: str) -> TeamBudgetResponse:
+        try:
+            return ledger.get_team_budget(_validate_team_role(team_role))
+        except TeamBudgetNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="team budget not found") from exc
+
+    @api.get("/v1/admin/budget/teams", response_model=list[TeamBudgetResponse], response_model_by_alias=True)
+    def list_team_budgets() -> list[TeamBudgetResponse]:
+        return ledger.list_team_budgets()
+
+    @api.get("/v1/admin/budget/metrics", response_model=BudgetMetricsResponse, response_model_by_alias=True)
+    def get_budget_metrics() -> BudgetMetricsResponse:
+        return ledger.get_budget_metrics()
+
+    @api.put("/v1/admin/budget/teams/{team_role}", response_model=TeamBudgetResponse, response_model_by_alias=True)
+    def set_team_budget(team_role: str, update: TeamBudgetUpdate) -> TeamBudgetResponse:
+        try:
+            return ledger.set_team_budget(
+                _validate_team_role(team_role),
+                update.per_user_limit_usd,
+            )
         except LedgerConflictError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -112,19 +145,39 @@ def create_app() -> FastAPI:
     @api.post("/v1/reservations", response_model=ReservationResponse, response_model_by_alias=True)
     def reserve(request: ReservationRequest) -> ReservationResponse:
         try:
+            if (request.team_role is None) != (request.user_key is None):
+                raise HTTPException(status_code=400, detail="teamRole and userKey must be supplied together")
+            if request.user_key is not None and request.caller_key != request.user_key:
+                raise HTTPException(status_code=400, detail="callerKey must match userKey")
             price = catalog.get(request.deployment)
             serialized = json.dumps(request.request, separators=(",", ":"), ensure_ascii=False).encode()
             requested_output = request.request.get("max_completion_tokens", request.request.get("max_tokens"))
             maximum_output = price.max_output_tokens if requested_output is None else int(requested_output)
             amount = calculate_reservation_usd(len(serialized), maximum_output, rates_from_price(price))
-            return ledger.reserve(
+            if request.team_role is None or request.user_key is None:
+                return ledger.reserve(
+                    request.operation_id,
+                    request.caller_key,
+                    amount,
+                    {"appId": request.app_id, "deployment": request.deployment, "priceId": price.id},
+                )
+            return ledger.reserve_for_team(
                 request.operation_id,
-                request.caller_key,
+                request.team_role,
+                request.user_key,
                 amount,
-                {"appId": request.app_id, "deployment": request.deployment, "priceId": price.id},
+                {
+                    "userEmail": request.user_email,
+                    "userName": request.user_name,
+                    "appId": request.app_id,
+                    "deployment": request.deployment,
+                    "priceId": price.id,
+                },
             )
         except (PriceNotFoundError, AmbiguousPriceError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except TeamBudgetNotFoundError as exc:
+            raise HTTPException(status_code=403, detail="no budget policy is configured for this team") from exc
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail="invalid token limit") from exc
         except LedgerConflictError as exc:
@@ -167,6 +220,16 @@ def create_app() -> FastAPI:
 
 def _email_caller_key(email: str) -> str:
     return f"email:{email.strip().lower()}"
+
+
+def _validate_team_role(team_role: str) -> str:
+    normalized = team_role.strip()
+    if not normalized or len(normalized) > 128 or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        for character in normalized
+    ):
+        raise HTTPException(status_code=400, detail="invalid team role")
+    return normalized
 
 
 app = EntraAuthMiddleware(create_app())

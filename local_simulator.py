@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -12,12 +13,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.models import BudgetProbeRequest, PriceDocument
+from analytics import EMPTY_DASHBOARD, configured_analytics
+from app.models import BudgetProbeRequest, PriceDocument, TeamBudgetUpdate
 from app.simulator import BudgetUpdate, SimulationRequest, SimulationResponse, SimulatorStore
 
 
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "simulator_web"
+LOGGER = logging.getLogger(__name__)
 
 
 def create_simulator_app(
@@ -25,6 +28,7 @@ def create_simulator_app(
     cost_api_url: str | None = None,
     admin_api_key: str | None = None,
     transport: httpx.BaseTransport | None = None,
+    analytics_provider: Any | None = None,
 ) -> FastAPI:
     store = SimulatorStore(
         state_path or ROOT / ".local" / "simulator-state.json",
@@ -39,6 +43,7 @@ def create_simulator_app(
         timeout=10,
         transport=transport,
     ) if remote_url else None
+    analytics = analytics_provider if analytics_provider is not None else configured_analytics()
     api.mount("/assets", StaticFiles(directory=WEB_ROOT, check_dir=False), name="assets")
 
     @api.get("/", include_in_schema=False)
@@ -49,14 +54,32 @@ def create_simulator_app(
     def state() -> dict:
         snapshot = store.snapshot()
         snapshot["backendMode"] = "live" if remote else "simulation"
+        snapshot["backendCompatible"] = True
+        snapshot["backendError"] = ""
         snapshot["defaultLimitUsd"] = None
+        snapshot["teams"] = {}
+        snapshot["budgetMetrics"] = {"period": "", "teams": [], "users": []}
         if remote:
-            snapshot["defaultLimitUsd"] = _remote_json(remote, "GET", "/v1/admin/budget/default")["limitUsd"]
             prices = _remote_json(remote, "GET", "/v1/admin/prices")
             snapshot["prices"] = {price["deployment"]: price for price in prices}
-            snapshot["users"] = {
-                email: user for email, user in snapshot["users"].items() if "@" in email
+            try:
+                policies = _remote_json(remote, "GET", "/v1/admin/budget/teams")
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                policies = []
+                snapshot["backendCompatible"] = False
+                snapshot["backendError"] = (
+                    "Deploy the latest cost API revision; the configured backend "
+                    "does not provide team-budget endpoints."
+                )
+            snapshot["teams"] = {
+                policy["teamRole"]: policy
+                for policy in policies
             }
+            if snapshot["backendCompatible"]:
+                snapshot["budgetMetrics"] = _remote_json(remote, "GET", "/v1/admin/budget/metrics")
+            snapshot["users"] = {}
             snapshot["history"] = []
         for user in snapshot["users"].values():
             if remote:
@@ -68,6 +91,36 @@ def create_simulator_app(
                     "f",
                 )
         return snapshot
+
+    @api.get("/api/analytics")
+    def dashboard_analytics(
+        days: int = 30,
+        team: str = "",
+        app_id: str = "",
+        model: str = "",
+    ) -> dict[str, Any]:
+        if analytics is None:
+            return {**EMPTY_DASHBOARD, "rangeDays": min(max(days, 1), 90)}
+        try:
+            return analytics.dashboard(days=days, team=team, app=app_id, model=model)
+        except Exception as exc:
+            LOGGER.warning("Azure Monitor dashboard query failed: %s", exc)
+            return {
+                **EMPTY_DASHBOARD,
+                "rangeDays": min(max(days, 1), 90),
+                "reason": "Azure Monitor query unavailable. Verify Azure sign-in, configuration, and Reader access.",
+            }
+
+    @api.put("/api/admin/budget/teams/{team_role}")
+    def set_live_team(team_role: str, update: TeamBudgetUpdate) -> dict[str, Any]:
+        if remote is None:
+            raise HTTPException(status_code=409, detail="COST_ENFORCEMENT_URL is not configured")
+        return _remote_json(
+            remote,
+            "PUT",
+            f"/v1/admin/budget/teams/{quote(team_role, safe='')}",
+            update.model_dump(by_alias=True, mode="json"),
+        )
 
     @api.put("/api/admin/budget/default")
     def set_live_default(update: BudgetUpdate) -> dict[str, Any]:

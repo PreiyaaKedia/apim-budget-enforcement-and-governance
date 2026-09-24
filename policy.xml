@@ -44,14 +44,47 @@
     var jwt = (Jwt)context.Variables["jwt"];
     return jwt.Claims.GetValueOrDefault("name", "");
 }' />
+        <!-- team-app-roles is a comma-separated named value, for example:
+             Team.Engineering,Team.SCM,Team.Marketing -->
+        <set-variable name="teamRole" value='@{
+            var jwt = (Jwt)context.Variables["jwt"];
+            var tokenRoles = jwt.Claims.GetValueOrDefault("roles", string.Empty)
+                .Split(","[0])
+                .Select(role => role.Trim())
+                .Where(role => !string.IsNullOrEmpty(role))
+                .ToArray();
+            var allowedRoles = "{{team-app-roles}}"
+                .Split(","[0])
+                .Select(role => role.Trim())
+                .Where(role => !string.IsNullOrEmpty(role))
+                .ToArray();
+            var matches = allowedRoles
+                .Where(allowed => tokenRoles.Any(role => string.Equals(role, allowed, StringComparison.OrdinalIgnoreCase)))
+                .ToArray();
+            return matches.Length == 1 ? matches[0] : matches.Length == 0 ? "" : "__multiple__";
+        }' />
         <choose>
             <when condition='@(string.IsNullOrEmpty((string)context.Variables["userId"]) || string.IsNullOrEmpty((string)context.Variables["userEmail"]))'>
                 <return-response>
                     <set-status code="403" reason="A delegated user identity with email is required" />
+                    <set-body>{"error":"delegated_user_required"}</set-body>
+                </return-response>
+            </when>
+            <when condition='@((string)context.Variables["teamRole"] == "")'>
+                <return-response>
+                    <set-status code="403" reason="A team role is required" />
+                    <set-body>{"error":"team_role_required"}</set-body>
+                </return-response>
+            </when>
+            <when condition='@((string)context.Variables["teamRole"] == "__multiple__")'>
+                <return-response>
+                    <set-status code="403" reason="Multiple team roles are not supported" />
+                    <set-body>{"error":"ambiguous_team_role"}</set-body>
                 </return-response>
             </when>
         </choose>
-        <set-variable name="callerKey" value='@("email:" + (string)context.Variables["userEmail"])' />
+        <set-variable name="userKey" value='@("user:" + (string)context.Variables["tenantId"] + ":" + (string)context.Variables["userId"])' />
+        <set-variable name="callerKey" value='@((string)context.Variables["userKey"])' />
         <set-variable name="requestBody" value='@{
     try {
         var body = context.Request.Body.As&lt;string&gt;(preserveContent: true);
@@ -94,9 +127,9 @@
         <quota-by-key calls="500000" renewal-period="2592000" counter-key='@("calls-mo-" + (string)context.Variables["userId"])' />
         <!-- 4d. Monthly CALL quota per app -->
         <quota-by-key calls="5000000" renewal-period="2592000" counter-key='@("calls-mo-app-" + (string)context.Variables["appId"])' />
-        <!-- 4e. Reserve from one monthly USD budget per caller across every model.
-             The cost authority owns the price catalog and atomically reserves the
-             worst-case request cost. It must be idempotent on operationId. -->
+           <!-- 4e. Resolve the team's per-user policy, then reserve from this user's
+               independent monthly USD budget across every model. The cost authority
+               owns policy lookup, pricing, and atomic reservation. -->
         <send-request mode="new" response-variable-name="costReservationResponse" timeout="5" ignore-error="true">
             <set-url>{{cost-enforcement-url}}/v1/reservations</set-url>
             <set-method>POST</set-method>
@@ -107,6 +140,10 @@
                 return new JObject(
                     new JProperty("operationId", context.RequestId.ToString()),
                     new JProperty("callerKey", (string)context.Variables["callerKey"]),
+                    new JProperty("teamRole", (string)context.Variables["teamRole"]),
+                    new JProperty("userKey", (string)context.Variables["userKey"]),
+                    new JProperty("userEmail", (string)context.Variables["userEmail"]),
+                    new JProperty("userName", (string)context.Variables["userName"]),
                     new JProperty("appId", (string)context.Variables["appId"]),
                     new JProperty("deployment", (string)context.Variables["deploymentName"]),
                     new JProperty("period", "Monthly"),
@@ -274,12 +311,32 @@
             }</set-body>
             <authentication-managed-identity resource="{{cost-enforcement-app-id}}" />
         </send-request>
+        <set-variable name="actualUsd" value='@{
+            var response = context.Variables.GetValueOrDefault&lt;IResponse&gt;("costSettlementResponse");
+            if (response == null || response.StatusCode != 200) {
+                return "";
+            }
+            try {
+                return (string)response.Body.As&lt;JObject&gt;(preserveContent: true)["actualUsd"] ?? "";
+            } catch { return ""; }
+        }' />
+        <set-variable name="remainingBudgetUsd" value='@{
+            var response = context.Variables.GetValueOrDefault&lt;IResponse&gt;("costSettlementResponse");
+            if (response == null || response.StatusCode != 200) {
+                return "";
+            }
+            try {
+                return (string)response.Body.As&lt;JObject&gt;(preserveContent: true)["remainingUsd"] ?? "";
+            } catch { return ""; }
+        }' />
         <trace source="llm-usage" severity="information">
             <message>llm-request</message>
             <metadata name="correlationId" value="@(context.RequestId.ToString())" />
             <metadata name="userId" value='@((string)context.Variables["userId"])' />
+            <metadata name="userKey" value='@((string)context.Variables["userKey"])' />
             <metadata name="appId" value='@((string)context.Variables["appId"])' />
             <metadata name="tenantId" value='@((string)context.Variables["tenantId"])' />
+            <metadata name="teamRole" value='@((string)context.Variables["teamRole"])' />
             <metadata name="apiName" value="@(context.Api.Name)" />
             <metadata name="userEmail" value='@((string)context.Variables["userEmail"])' />
             <metadata name="userName" value='@((string)context.Variables["userName"])' />
@@ -293,6 +350,8 @@
             <metadata name="cacheWriteTokens" value='@(((int)context.Variables["cacheWriteTokens"]).ToString())' />
             <metadata name="cacheReadTokens" value='@(((int)context.Variables["cacheReadTokens"]).ToString())' />
             <metadata name="totalTokens" value='@(((int)context.Variables["totalTokens"]).ToString())' />
+            <metadata name="actualUsd" value='@((string)context.Variables["actualUsd"])' />
+            <metadata name="remainingBudgetUsd" value='@((string)context.Variables["remainingBudgetUsd"])' />
             <metadata name="servedBy" value='@((string)context.Variables.GetValueOrDefault("activeBackend","primary"))' />
         </trace>
         <set-header name="x-user-id" exists-action="override">

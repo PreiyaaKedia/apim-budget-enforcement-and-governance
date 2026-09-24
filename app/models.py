@@ -19,6 +19,10 @@ class ApiModel(BaseModel):
 class ReservationRequest(ApiModel):
     operation_id: str = Field(min_length=1, max_length=128)
     caller_key: str = Field(min_length=1, max_length=512)
+    team_role: str | None = Field(default=None, min_length=1, max_length=128)
+    user_key: str | None = Field(default=None, min_length=1, max_length=256)
+    user_email: str = Field(default="", max_length=320)
+    user_name: str = Field(default="", max_length=256)
     app_id: str = Field(min_length=1, max_length=128)
     deployment: str = Field(min_length=1, max_length=128)
     period: Literal["Monthly"] = "Monthly"
@@ -61,6 +65,10 @@ class UserBudgetUpdate(BudgetUpdate):
     email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+class TeamBudgetUpdate(ApiModel):
+    per_user_limit_usd: Decimal = Field(gt=0)
+
+
 class BudgetResponse(ApiModel):
     caller_key: str
     period: str
@@ -72,6 +80,39 @@ class BudgetResponse(ApiModel):
 
 class DefaultBudgetResponse(ApiModel):
     limit_usd: Decimal
+
+
+class TeamBudgetResponse(ApiModel):
+    team_role: str
+    per_user_limit_usd: Decimal
+
+
+class UserBudgetMetrics(ApiModel):
+    user_key: str
+    user_email: str = ""
+    user_name: str = ""
+    team_role: str
+    period: str
+    allocated_usd: Decimal
+    spent_usd: Decimal
+    reserved_usd: Decimal
+    remaining_usd: Decimal
+
+
+class TeamBudgetMetrics(ApiModel):
+    team_role: str
+    period: str
+    active_users: int
+    allocated_usd: Decimal
+    spent_usd: Decimal
+    reserved_usd: Decimal
+    remaining_usd: Decimal
+
+
+class BudgetMetricsResponse(ApiModel):
+    period: str
+    teams: list[TeamBudgetMetrics]
+    users: list[UserBudgetMetrics]
 
 
 class BudgetProbeRequest(ApiModel):
