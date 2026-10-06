@@ -174,6 +174,8 @@ def test_queries_read_both_apim_metadata_shapes_without_duplicate_projections() 
             assert f'Metadata["prop__{key}"]' in query
         assert query.count("actualUsd = ") == 1
         assert query.count("servedBy = ") == 1
+        assert "| summarize arg_max(timestamp, *) by correlationId" in query
+        assert query.index("summarize arg_max(timestamp, *) by correlationId") < query.index("take 20001")
 
 
 def test_partial_monitor_query_is_not_reported_as_an_empty_success() -> None:

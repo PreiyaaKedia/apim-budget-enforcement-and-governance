@@ -412,6 +412,14 @@ def create_simulator_app(
             body.model_dump(by_alias=True, mode="json"),
         )
 
+    @api.post("/api/admin/reservations/reconcile")
+    def reconcile_expired_reservations(
+        _principal: ConsolePrincipal = Depends(require_admin),
+    ) -> dict[str, Any]:
+        if remote is None:
+            raise HTTPException(status_code=409, detail="COST_ENFORCEMENT_URL is not configured")
+        return _remote_json(remote, "POST", "/v1/admin/reservations/reconcile")
+
     @api.put("/api/users/{user_id}")
     def set_budget(
         user_id: str,

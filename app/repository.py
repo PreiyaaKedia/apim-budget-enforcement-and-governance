@@ -325,6 +325,25 @@ class CosmosLedger:
     def release(self, reservation_id: str) -> SettlementResponse:
         return self.settle(reservation_id, Decimal('0'), {"released": True}, final_status="released")
 
+    def release_expired_reservations(self) -> tuple[int, Decimal]:
+        expired = self._container.query_items(
+            query=(
+                "SELECT c.id, c.reservedUsd FROM c "
+                "WHERE c.type = 'reservation' AND c.status = 'reserved' "
+                "AND c.expiresAt <= @now"
+            ),
+            parameters=[{"name": "@now", "value": int(time())}],
+            enable_cross_partition_query=True,
+        )
+        released_count = 0
+        released_usd = Decimal("0")
+        for reservation in expired:
+            settlement = self.release(reservation["id"])
+            if settlement.status == "released":
+                released_count += 1
+                released_usd += settlement.released_usd
+        return released_count, released_usd
+
     def get_reservation(self, reservation_id: str) -> dict[str, Any]:
         partition_key = self._partition_from_reservation_id(reservation_id)
         reservation = self._read_optional(reservation_id, partition_key)

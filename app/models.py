@@ -58,6 +58,11 @@ class SettlementResponse(ApiModel):
     spend_breakdown: dict[str, Decimal] | None = None
 
 
+class ReservationReconciliationResponse(ApiModel):
+    released_reservations: int
+    released_usd: Decimal
+
+
 class BudgetUpdate(ApiModel):
     limit_usd: Decimal = Field(gt=0)
 

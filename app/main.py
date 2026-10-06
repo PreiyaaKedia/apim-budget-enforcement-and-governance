@@ -20,6 +20,7 @@ from app.models import (
     BudgetUpdate,
     DefaultBudgetResponse,
     PriceDocument,
+    ReservationReconciliationResponse,
     ReservationRequest,
     ReservationResponse,
     SettlementRequest,
@@ -123,6 +124,21 @@ def create_app() -> FastAPI:
                 allowed=True,
                 amount_usd=request.amount_usd,
                 remaining_usd=released.remaining_usd,
+            )
+        except LedgerConflictError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @api.post(
+        "/v1/admin/reservations/reconcile",
+        response_model=ReservationReconciliationResponse,
+        response_model_by_alias=True,
+    )
+    def reconcile_expired_reservations() -> ReservationReconciliationResponse:
+        try:
+            released_reservations, released_usd = ledger.release_expired_reservations()
+            return ReservationReconciliationResponse(
+                released_reservations=released_reservations,
+                released_usd=released_usd,
             )
         except LedgerConflictError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc

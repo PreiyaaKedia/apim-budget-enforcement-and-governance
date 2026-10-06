@@ -1,5 +1,6 @@
 from copy import deepcopy
 from decimal import Decimal
+from time import time
 
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
@@ -44,6 +45,10 @@ class FakeContainer:
             (parameter["value"] for parameter in parameters or [] if parameter["name"] == "@periodSuffix"),
             None,
         )
+        expires_before = next(
+            (parameter["value"] for parameter in parameters or [] if parameter["name"] == "@now"),
+            None,
+        )
         return [
             deepcopy(item)
             for (item_partition, _), item in self.items.items()
@@ -60,6 +65,13 @@ class FakeContainer:
                     and item.get("type") == "reservation"
                     and (expected_team is None or item.get("teamRole") == expected_team)
                     and (period_suffix is None or item.get("partitionKey", "").endswith(period_suffix))
+                    and (
+                        expires_before is None
+                        or (
+                            item.get("status") == "reserved"
+                            and item.get("expiresAt", expires_before + 1) <= expires_before
+                        )
+                    )
                 )
             )
         ]
@@ -93,6 +105,23 @@ def test_spend_breakdown_survives_idempotent_settlement() -> None:
     duplicate = ledger.settle(reservation.reservation_id, Decimal("0.036"), {})
     assert duplicate == first
     assert first.model_dump(mode="json", by_alias=True)["spendBreakdown"] == usage["spendBreakdown"]
+
+
+def test_expired_reservations_are_released_and_active_reservations_remain() -> None:
+    container = FakeContainer()
+    ledger = CosmosLedger(container, monthly_limit_usd=Decimal("1"))
+    expired = ledger.reserve("expired", "user", Decimal("0.20"), {"deployment": "model-a"})
+    active = ledger.reserve("active", "user", Decimal("0.30"), {"deployment": "model-a"})
+    container.items[("user:2026-10", expired.reservation_id)]["expiresAt"] = int(time()) - 1
+    container.items[("user:2026-10", active.reservation_id)]["expiresAt"] = int(time()) + 900
+
+    released_count, released_usd = ledger.release_expired_reservations()
+
+    assert released_count == 1
+    assert released_usd == Decimal("0.20")
+    assert ledger.get_reservation(expired.reservation_id)["status"] == "released"
+    assert ledger.get_reservation(active.reservation_id)["status"] == "reserved"
+    assert ledger.get_budget("user").reserved_usd == Decimal("0.30")
 
 
 def test_settlement_api_emits_authoritative_cache_spend(monkeypatch) -> None:

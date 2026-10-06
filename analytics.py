@@ -101,6 +101,7 @@ traces
     status = coalesce(status, requestResultCode),
     correlationId = iff(isempty(correlationId), operation_Id, correlationId)
 | project-away operation_Id1, requestResultCode
+| summarize arg_max(timestamp, *) by correlationId
 | order by timestamp desc
 | take 20001
 """.strip()
@@ -121,6 +122,7 @@ ApiManagementGatewayLogs
     totalTokens = tolong(coalesce(Metadata.totalTokens, Metadata["totalTokens"])),
     latencyMs = tolong(TotalTime),
     backendLatencyMs = tolong(BackendTime)
+| summarize arg_max(timestamp, *) by correlationId
 | order by timestamp desc
 | take 20001
 """.strip()

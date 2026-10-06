@@ -22,14 +22,22 @@ def test_count_tokens_bypasses_inference_reservations_and_telemetry() -> None:
         assert guarded.find("send-request") is not None or guarded.find("choose") is not None
 
 
-def test_usage_totals_include_cache_and_streaming_is_not_settled_as_zero() -> None:
+def test_usage_totals_include_cache_and_only_complete_buffered_streams_settle() -> None:
     policy = ET.parse(POLICY).getroot()
     usage = policy.find(".//set-variable[@name='responseUsage']").attrib["value"]
     assert "text/event-stream" in usage
+    assert all(event in usage for event in ("message_start", "message_delta", "message_stop"))
+    assert "streaming_buffered" in usage
     assert "streaming_unsettled" in usage
+    forward = policy.find("backend/forward-request")
+    assert forward is not None
+    assert forward.attrib["buffer-response"] == "true"
     total = policy.find(".//set-variable[@name='totalTokens']").attrib["value"]
     assert all(key in total for key in ("inputTokens", "completionTokens", "cacheWriteTokens", "cacheReadTokens"))
-    settlement = policy.find("outbound/choose/when/choose/when/send-request")
+    settlement_branch = policy.find("outbound/choose/when/choose/when")
+    assert settlement_branch is not None
+    assert "streaming_buffered" in settlement_branch.attrib["condition"]
+    settlement = settlement_branch.find("send-request")
     assert settlement is not None
     assert "/settle" in settlement.find("set-url").text
 

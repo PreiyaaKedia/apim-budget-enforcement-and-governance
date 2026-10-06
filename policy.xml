@@ -211,7 +211,7 @@
     <backend>
         <!-- Do not immediately retry a throttled request against the same backend.
              Preserve the backend's Retry-After for the client's retry policy. -->
-        <forward-request buffer-request-body="true" />
+        <forward-request buffer-request-body="true" buffer-response="true" />
     </backend>
     <outbound>
         <base />
@@ -229,12 +229,65 @@
         <when condition='@(!(bool)context.Variables["isTokenCount"])'>
         <!-- Path B: emit a per-request record with identity + real token usage.
      Lands in Application Insights `traces` (LA table: AppTraces). -->
-        <!-- Read JSON only. Never consume an SSE body in an outbound expression:
-             true streaming requires settlement in a streaming-aware proxy. -->
+        <!-- Buffer SSE so usage can be read from Anthropic message_start and the
+             final message_delta. preserveContent keeps the original SSE body for
+             the caller, but delivery is delayed until the stream completes. -->
         <set-variable name="responseUsage" value='@{
             var contentType = context.Response.Headers.GetValueOrDefault("Content-Type", "");
             if (contentType.IndexOf("text/event-stream", StringComparison.OrdinalIgnoreCase) >= 0) {
-                return new JObject(new JProperty("state", "streaming_unsettled")).ToString();
+                try {
+                    var streamBody = context.Response.Body.As&lt;string&gt;(preserveContent: true);
+                    JObject startUsage = null;
+                    JObject finalUsage = null;
+                    string streamModel = null;
+                    bool completed = false;
+                    foreach (var rawLine in streamBody.Split(&apos;\n&apos;)) {
+                        var line = rawLine.Trim();
+                        if (!line.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) {
+                            continue;
+                        }
+                        var data = line.Substring(5).Trim();
+                        if (string.IsNullOrEmpty(data) || data == "[DONE]") {
+                            continue;
+                        }
+                        JObject streamEvent;
+                        try {
+                            streamEvent = JObject.Parse(data);
+                        } catch {
+                            continue;
+                        }
+                        var eventType = (string)streamEvent["type"];
+                        if (eventType == "message_start") {
+                            var message = streamEvent["message"] as JObject;
+                            startUsage = message?["usage"] as JObject;
+                            streamModel = (string)message?["model"];
+                        } else if (eventType == "message_delta") {
+                            finalUsage = streamEvent["usage"] as JObject;
+                        } else if (eventType == "message_stop") {
+                            completed = true;
+                        }
+                    }
+                    var hasInput = startUsage != null &amp;&amp; startUsage["input_tokens"] != null;
+                    var hasOutput = finalUsage != null &amp;&amp; finalUsage["output_tokens"] != null;
+                    if (!completed || !hasInput || !hasOutput) {
+                        return new JObject(new JProperty("state", "streaming_unsettled")).ToString();
+                    }
+                    var usage = new JObject(
+                        new JProperty("input_tokens", (int?)startUsage["input_tokens"] ?? 0),
+                        new JProperty("output_tokens", (int?)finalUsage["output_tokens"] ?? 0),
+                        new JProperty("cache_creation_input_tokens",
+                            (int?)startUsage["cache_creation_input_tokens"] ?? 0),
+                        new JProperty("cache_read_input_tokens",
+                            (int?)startUsage["cache_read_input_tokens"] ?? 0)
+                    );
+                    return new JObject(
+                        new JProperty("state", "streaming_buffered"),
+                        new JProperty("usage", usage),
+                        new JProperty("model", streamModel)
+                    ).ToString();
+                } catch {
+                    return new JObject(new JProperty("state", "streaming_unsettled")).ToString();
+                }
             }
             try {
                 var body = context.Response.Body.As&lt;JObject&gt;(preserveContent: true);
@@ -294,7 +347,7 @@
              cost from its deployment/model/version price catalog. An unsettled
              reservation remains charged at its reserved maximum. -->
         <choose>
-        <when condition='@((string)context.Variables["usageState"] == "available")'>
+        <when condition='@((string)context.Variables["usageState"] == "available" || (string)context.Variables["usageState"] == "streaming_buffered")'>
         <send-request mode="new" response-variable-name="costSettlementResponse" timeout="5" ignore-error="true">
             <set-url>@("{{cost-enforcement-url}}/v1/reservations/" + (string)context.Variables["costReservationId"] + "/settle")</set-url>
             <set-method>POST</set-method>

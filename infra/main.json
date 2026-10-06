@@ -1,0 +1,912 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.44.1.10279",
+      "templateHash": "11681002636227411849"
+    }
+  },
+  "parameters": {
+    "namePrefix": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 20,
+      "metadata": {
+        "description": "Short lowercase prefix used in globally unique resource names."
+      }
+    },
+    "containerImage": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Container image containing the cost enforcement API. Leave empty to use the image repository and tag in the registry created by this template."
+      }
+    },
+    "imageRepository": {
+      "type": "string",
+      "defaultValue": "cost-enforcement-api",
+      "metadata": {
+        "description": "Repository name used for the remotely built image."
+      }
+    },
+    "imageTag": {
+      "type": "string",
+      "defaultValue": "python3-fix",
+      "metadata": {
+        "description": "Tag used for the remotely built image."
+      }
+    },
+    "consoleContainerImage": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Container image containing the budget console. Leave empty to use the console repository and tag in the registry created by this template."
+      }
+    },
+    "consoleImageRepository": {
+      "type": "string",
+      "defaultValue": "budget-console",
+      "metadata": {
+        "description": "Repository name used for the remotely built console image."
+      }
+    },
+    "consoleImageTag": {
+      "type": "string",
+      "defaultValue": "latest",
+      "metadata": {
+        "description": "Tag used for the remotely built console image."
+      }
+    },
+    "deployContainerApp": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the Container App. Set to false for the initial registry bootstrap, then remotely build the image and redeploy with true."
+      }
+    },
+    "deployConsole": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the budget console. Set to false during the initial registry bootstrap."
+      }
+    },
+    "tenantId": {
+      "type": "string",
+      "defaultValue": "[tenant().tenantId]",
+      "metadata": {
+        "description": "Entra tenant that issues APIM managed identity tokens."
+      }
+    },
+    "audience": {
+      "type": "string",
+      "metadata": {
+        "description": "Audience exposed by the cost API. Use the service principal name registered in Entra, such as the bare application ID."
+      }
+    },
+    "apimManagedIdentityClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "Client ID of the APIM managed identity allowed to call the API."
+      }
+    },
+    "consoleClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "Client ID of the Entra SPA used by the console MSAL Browser authorization-code flow with PKCE."
+      }
+    },
+    "consoleAllowedEmailDomains": {
+      "type": "array",
+      "metadata": {
+        "description": "Employee email domains allowed to self-provision as console members."
+      }
+    },
+    "consoleOwnerUsername": {
+      "type": "string",
+      "metadata": {
+        "description": "Username for the local console owner account."
+      }
+    },
+    "consoleOwnerPasswordHash": {
+      "type": "securestring",
+      "metadata": {
+        "description": "PBKDF2-SHA256 password hash for the local console owner account."
+      }
+    },
+    "consoleOwnerSessionSecret": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Random secret used to sign console owner and employee sessions."
+      }
+    },
+    "costApiScope": {
+      "type": "string",
+      "defaultValue": "[format('api://{0}/.default', parameters('audience'))]",
+      "metadata": {
+        "description": "OAuth scope requested by the console managed identity when calling the cost API."
+      }
+    },
+    "applicationInsightsResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full resource ID of the Application Insights component queried by the FinOps dashboard."
+      }
+    },
+    "adminAuthDisabled": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Allow unauthenticated access to admin budget endpoints for prototype testing. Keep false outside controlled testing."
+      }
+    },
+    "monthlyLimitUsd": {
+      "type": "string",
+      "defaultValue": "100.00",
+      "metadata": {
+        "description": "Monthly caller budget in decimal USD."
+      }
+    },
+    "costApiName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-vnet-api', parameters('namePrefix'))]",
+      "metadata": {
+        "description": "Name of the cost API Container App."
+      }
+    },
+    "consoleAppName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-budget-console', parameters('namePrefix'))]",
+      "metadata": {
+        "description": "Name of the budget console Container App."
+      }
+    },
+    "containerAppsEnvironmentName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-vnet-env', parameters('namePrefix'))]",
+      "metadata": {
+        "description": "Name of the Container Apps environment."
+      }
+    },
+    "virtualNetworkName": {
+      "type": "string",
+      "defaultValue": "[format('{0}-cost-vnet', parameters('namePrefix'))]",
+      "metadata": {
+        "description": "Name of the virtual network."
+      }
+    },
+    "containerRegistryName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional globally unique Container Registry name. Leave empty to derive one from the deployment scope."
+      }
+    },
+    "cosmosAccountName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional globally unique Cosmos DB account name. Leave empty to derive one from the deployment scope."
+      }
+    },
+    "vnetAddressPrefix": {
+      "type": "string",
+      "defaultValue": "10.20.0.0/16",
+      "metadata": {
+        "description": "Address space for the cost enforcement virtual network."
+      }
+    },
+    "containerAppsSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.20.0.0/27",
+      "metadata": {
+        "description": "Dedicated subnet for the workload-profile Container Apps environment."
+      }
+    },
+    "privateEndpointSubnetPrefix": {
+      "type": "string",
+      "defaultValue": "10.20.1.0/24",
+      "metadata": {
+        "description": "Dedicated subnet for private endpoints."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "variables": {
+    "uniqueSuffix": "[uniqueString(subscription().subscriptionId, resourceGroup().id)]",
+    "cosmosName": "[if(empty(parameters('cosmosAccountName')), take(format('{0}-{1}', parameters('namePrefix'), variables('uniqueSuffix')), 44), parameters('cosmosAccountName'))]",
+    "registryName": "[if(empty(parameters('containerRegistryName')), toLower(take(format('{0}{1}', replace(parameters('namePrefix'), '-', ''), variables('uniqueSuffix')), 50)), parameters('containerRegistryName'))]",
+    "vnetName": "[parameters('virtualNetworkName')]",
+    "containerAppsSubnetName": "container-apps-infrastructure",
+    "privateEndpointSubnetName": "private-endpoints",
+    "environmentName": "[parameters('containerAppsEnvironmentName')]",
+    "appName": "[parameters('costApiName')]",
+    "pullIdentityName": "[format('{0}-pull', parameters('namePrefix'))]",
+    "cosmosPrivateEndpointName": "[format('{0}-cosmos-pe', parameters('namePrefix'))]",
+    "cosmosPrivateDnsZoneName": "privatelink.documents.azure.com",
+    "acrPullRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')]",
+    "applicationInsightsIdParts": "[split(parameters('applicationInsightsResourceId'), '/')]",
+    "applicationInsightsSubscriptionId": "[variables('applicationInsightsIdParts')[2]]",
+    "applicationInsightsResourceGroup": "[variables('applicationInsightsIdParts')[4]]",
+    "applicationInsightsName": "[variables('applicationInsightsIdParts')[8]]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('vnetName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "[parameters('vnetAddressPrefix')]"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "[variables('containerAppsSubnetName')]",
+            "properties": {
+              "addressPrefix": "[parameters('containerAppsSubnetPrefix')]",
+              "delegations": [
+                {
+                  "name": "Microsoft.App.environments",
+                  "properties": {
+                    "serviceName": "Microsoft.App/environments"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "[variables('privateEndpointSubnetName')]",
+            "properties": {
+              "addressPrefix": "[parameters('privateEndpointSubnetPrefix')]",
+              "privateEndpointNetworkPolicies": "Disabled"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-07-01",
+      "name": "[variables('registryName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Basic"
+      },
+      "properties": {
+        "adminUserEnabled": false,
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[variables('pullIdentityName')]",
+      "location": "[parameters('location')]"
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.ContainerRegistry/registries', variables('registryName'))]",
+      "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName')), variables('acrPullRoleDefinitionId'))]",
+      "properties": {
+        "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName')), '2023-01-31').principalId]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[variables('acrPullRoleDefinitionId')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName'))]",
+        "[resourceId('Microsoft.ContainerRegistry/registries', variables('registryName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DocumentDB/databaseAccounts",
+      "apiVersion": "2024-11-15",
+      "name": "[variables('cosmosName')]",
+      "location": "[parameters('location')]",
+      "kind": "GlobalDocumentDB",
+      "properties": {
+        "databaseAccountOfferType": "Standard",
+        "disableLocalAuth": true,
+        "publicNetworkAccess": "Disabled",
+        "ipRules": [],
+        "minimalTlsVersion": "Tls12",
+        "consistencyPolicy": {
+          "defaultConsistencyLevel": "Session"
+        },
+        "capabilities": [
+          {
+            "name": "EnableServerless"
+          }
+        ],
+        "locations": [
+          {
+            "locationName": "[parameters('location')]",
+            "failoverPriority": 0,
+            "isZoneRedundant": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases",
+      "apiVersion": "2024-11-15",
+      "name": "[format('{0}/{1}', variables('cosmosName'), 'cost-enforcement')]",
+      "properties": {
+        "resource": {
+          "id": "cost-enforcement"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers",
+      "apiVersion": "2024-11-15",
+      "name": "[format('{0}/{1}/{2}', variables('cosmosName'), 'cost-enforcement', 'ledger')]",
+      "properties": {
+        "resource": {
+          "id": "ledger",
+          "partitionKey": {
+            "paths": [
+              "/partitionKey"
+            ],
+            "kind": "Hash",
+            "version": 2
+          },
+          "conflictResolutionPolicy": {
+            "mode": "LastWriterWins",
+            "conflictResolutionPath": "/_ts"
+          },
+          "indexingPolicy": {
+            "indexingMode": "consistent",
+            "automatic": true,
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "excludedPaths": [
+              {
+                "path": "/usage/*"
+              },
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts/sqlDatabases', variables('cosmosName'), 'cost-enforcement')]"
+      ]
+    },
+    {
+      "type": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers",
+      "apiVersion": "2024-11-15",
+      "name": "[format('{0}/{1}/{2}', variables('cosmosName'), 'cost-enforcement', 'pricing')]",
+      "properties": {
+        "resource": {
+          "id": "pricing",
+          "partitionKey": {
+            "paths": [
+              "/deployment"
+            ],
+            "kind": "Hash",
+            "version": 2
+          },
+          "conflictResolutionPolicy": {
+            "mode": "LastWriterWins",
+            "conflictResolutionPath": "/_ts"
+          },
+          "indexingPolicy": {
+            "indexingMode": "consistent",
+            "automatic": true,
+            "includedPaths": [
+              {
+                "path": "/*"
+              }
+            ],
+            "excludedPaths": [
+              {
+                "path": "/\"_etag\"/?"
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts/sqlDatabases', variables('cosmosName'), 'cost-enforcement')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2024-06-01",
+      "name": "[variables('cosmosPrivateDnsZoneName')]",
+      "location": "global"
+    },
+    {
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2024-06-01",
+      "name": "[format('{0}/{1}', variables('cosmosPrivateDnsZoneName'), format('{0}-cost-vnet-link', parameters('namePrefix')))]",
+      "location": "global",
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('cosmosPrivateDnsZoneName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2024-05-01",
+      "name": "[variables('cosmosPrivateEndpointName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "subnet": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('privateEndpointSubnetName'))]"
+        },
+        "privateLinkServiceConnections": [
+          {
+            "name": "[format('{0}-connection', variables('cosmosPrivateEndpointName'))]",
+            "properties": {
+              "privateLinkServiceId": "[resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName'))]",
+              "groupIds": [
+                "Sql"
+              ],
+              "requestMessage": "Private access for the cost enforcement API."
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName'))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-05-01",
+      "name": "[format('{0}/{1}', variables('cosmosPrivateEndpointName'), 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "cosmos-sql",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('cosmosPrivateDnsZoneName'))]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('cosmosPrivateDnsZoneName'))]",
+        "[resourceId('Microsoft.Network/privateEndpoints', variables('cosmosPrivateEndpointName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('environmentName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "vnetConfiguration": {
+          "infrastructureSubnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), variables('containerAppsSubnetName'))]",
+          "internal": false
+        },
+        "workloadProfiles": [
+          {
+            "name": "Consumption",
+            "workloadProfileType": "Consumption"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployConsole')]",
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('consoleAppName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned, UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName')))]": {}
+        }
+      },
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "secrets": [
+            {
+              "name": "console-owner-password-hash",
+              "value": "[parameters('consoleOwnerPasswordHash')]"
+            },
+            {
+              "name": "console-owner-session-secret",
+              "value": "[parameters('consoleOwnerSessionSecret')]"
+            }
+          ],
+          "registries": [
+            {
+              "server": "[reference(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), '2023-07-01').loginServer]",
+              "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName'))]"
+            }
+          ],
+          "ingress": {
+            "external": true,
+            "targetPort": 8000,
+            "transport": "auto",
+            "allowInsecure": false
+          }
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "console",
+              "image": "[if(empty(parameters('consoleContainerImage')), format('{0}/{1}:{2}', reference(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), '2023-07-01').loginServer, parameters('consoleImageRepository'), parameters('consoleImageTag')), parameters('consoleContainerImage'))]",
+              "resources": {
+                "cpu": "[json('0.25')]",
+                "memory": "0.5Gi"
+              },
+              "env": [
+                {
+                  "name": "COST_ENFORCEMENT_URL",
+                  "value": "[format('https://{0}.{1}', variables('appName'), reference(resourceId('Microsoft.App/managedEnvironments', variables('environmentName')), '2024-03-01').defaultDomain)]"
+                },
+                {
+                  "name": "COST_ENFORCEMENT_SCOPE",
+                  "value": "[parameters('costApiScope')]"
+                },
+                {
+                  "name": "APPLICATION_INSIGHTS_RESOURCE_ID",
+                  "value": "[parameters('applicationInsightsResourceId')]"
+                },
+                {
+                  "name": "CONSOLE_AUTH_DISABLED",
+                  "value": "false"
+                },
+                {
+                  "name": "CONSOLE_ALLOWED_EMAIL_DOMAINS",
+                  "value": "[join(parameters('consoleAllowedEmailDomains'), ',')]"
+                },
+                {
+                  "name": "CONSOLE_OWNER_USERNAME",
+                  "value": "[parameters('consoleOwnerUsername')]"
+                },
+                {
+                  "name": "CONSOLE_OWNER_PASSWORD_HASH",
+                  "secretRef": "console-owner-password-hash"
+                },
+                {
+                  "name": "CONSOLE_OWNER_SESSION_SECRET",
+                  "secretRef": "console-owner-session-secret"
+                },
+                {
+                  "name": "CONSOLE_OWNER_COOKIE_SECURE",
+                  "value": "true"
+                },
+                {
+                  "name": "CONSOLE_ENTRA_CLIENT_ID",
+                  "value": "[parameters('consoleClientId')]"
+                },
+                {
+                  "name": "CONSOLE_ENTRA_TENANT_ID",
+                  "value": "[parameters('tenantId')]"
+                }
+              ],
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 8000,
+                    "scheme": "HTTP"
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 30
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "/health",
+                    "port": 8000,
+                    "scheme": "HTTP"
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": 0,
+            "maxReplicas": 3,
+            "rules": [
+              {
+                "name": "http",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "25"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName')), variables('acrPullRoleDefinitionId')))]",
+        "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName'))]",
+        "[resourceId('Microsoft.ContainerRegistry/registries', variables('registryName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployConsole')]",
+      "type": "Microsoft.App/containerApps/authConfigs",
+      "apiVersion": "2024-03-01",
+      "name": "[format('{0}/{1}', parameters('consoleAppName'), 'current')]",
+      "properties": {
+        "platform": {
+          "enabled": false
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/containerApps', parameters('consoleAppName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployContainerApp')]",
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('appName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned, UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName')))]": {}
+        }
+      },
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "registries": [
+            {
+              "server": "[reference(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), '2023-07-01').loginServer]",
+              "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName'))]"
+            }
+          ],
+          "ingress": {
+            "external": true,
+            "targetPort": 8000,
+            "transport": "auto",
+            "allowInsecure": false
+          }
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "api",
+              "image": "[if(empty(parameters('containerImage')), format('{0}/{1}:{2}', reference(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), '2023-07-01').loginServer, parameters('imageRepository'), parameters('imageTag')), parameters('containerImage'))]",
+              "resources": {
+                "cpu": "[json('0.5')]",
+                "memory": "1Gi"
+              },
+              "env": [
+                {
+                  "name": "COSMOS_ENDPOINT",
+                  "value": "[reference(resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName')), '2024-11-15').documentEndpoint]"
+                },
+                {
+                  "name": "COSMOS_DATABASE",
+                  "value": "cost-enforcement"
+                },
+                {
+                  "name": "COSMOS_LEDGER_CONTAINER",
+                  "value": "ledger"
+                },
+                {
+                  "name": "COSMOS_PRICING_CONTAINER",
+                  "value": "pricing"
+                },
+                {
+                  "name": "MONTHLY_LIMIT_USD",
+                  "value": "[parameters('monthlyLimitUsd')]"
+                },
+                {
+                  "name": "TENANT_ID",
+                  "value": "[parameters('tenantId')]"
+                },
+                {
+                  "name": "AUDIENCE",
+                  "value": "[parameters('audience')]"
+                },
+                {
+                  "name": "ALLOWED_CLIENT_ID",
+                  "value": "[parameters('apimManagedIdentityClientId')]"
+                },
+                {
+                  "name": "ADMIN_ALLOWED_PRINCIPAL_ID",
+                  "value": "[coalesce(tryGet(if(parameters('deployConsole'), reference(resourceId('Microsoft.App/containerApps', parameters('consoleAppName')), '2024-03-01', 'full'), null()), 'identity', 'principalId'), '')]"
+                },
+                {
+                  "name": "ADMIN_REQUIRED_ROLE",
+                  "value": "CostEnforcement.Admin"
+                },
+                {
+                  "name": "ADMIN_AUTH_DISABLED",
+                  "value": "[string(parameters('adminAuthDisabled'))]"
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": 1,
+            "maxReplicas": 10,
+            "rules": [
+              {
+                "name": "http",
+                "http": {
+                  "metadata": {
+                    "concurrentRequests": "50"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName')), variables('acrPullRoleDefinitionId')))]",
+        "[resourceId('Microsoft.App/containerApps', parameters('consoleAppName'))]",
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName'))]",
+        "[resourceId('Microsoft.Network/privateDnsZones/virtualNetworkLinks', variables('cosmosPrivateDnsZoneName'), format('{0}-cost-vnet-link', parameters('namePrefix')))]",
+        "[resourceId('Microsoft.Network/privateEndpoints/privateDnsZoneGroups', variables('cosmosPrivateEndpointName'), 'default')]",
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts/sqlDatabases', variables('cosmosName'), 'cost-enforcement')]",
+        "[resourceId('Microsoft.App/managedEnvironments', variables('environmentName'))]",
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers', variables('cosmosName'), 'cost-enforcement', 'ledger')]",
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers', variables('cosmosName'), 'cost-enforcement', 'pricing')]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('pullIdentityName'))]",
+        "[resourceId('Microsoft.ContainerRegistry/registries', variables('registryName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployContainerApp')]",
+      "type": "Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments",
+      "apiVersion": "2024-11-15",
+      "name": "[format('{0}/{1}', variables('cosmosName'), guid(resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName')), resourceId('Microsoft.App/containerApps', variables('appName')), 'cosmos-data-contributor'))]",
+      "properties": {
+        "principalId": "[coalesce(tryGet(if(parameters('deployContainerApp'), reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01', 'full'), null()), 'identity', 'principalId'), '')]",
+        "roleDefinitionId": "[format('{0}/sqlRoleDefinitions/00000000-0000-0000-0000-000000000002', resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName')))]",
+        "scope": "[resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName'))]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/containerApps', variables('appName'))]",
+        "[resourceId('Microsoft.DocumentDB/databaseAccounts', variables('cosmosName'))]"
+      ]
+    },
+    {
+      "condition": "[parameters('deployConsole')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "console-monitoring-reader",
+      "subscriptionId": "[variables('applicationInsightsSubscriptionId')]",
+      "resourceGroup": "[variables('applicationInsightsResourceGroup')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "applicationInsightsName": {
+            "value": "[variables('applicationInsightsName')]"
+          },
+          "principalId": {
+            "value": "[coalesce(tryGet(if(parameters('deployConsole'), reference(resourceId('Microsoft.App/containerApps', parameters('consoleAppName')), '2024-03-01', 'full'), null()), 'identity', 'principalId'), '')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.44.1.10279",
+              "templateHash": "3568578781458852506"
+            }
+          },
+          "parameters": {
+            "applicationInsightsName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Application Insights component."
+              }
+            },
+            "principalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Object ID of the managed identity that reads Application Insights data."
+              }
+            }
+          },
+          "variables": {
+            "monitoringReaderRoleDefinitionGuid": "43d0d8ad-25c7-4714-9337-8ba259a9fe05"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Insights/components', parameters('applicationInsightsName'))]",
+              "name": "[guid(resourceId('Microsoft.Insights/components', parameters('applicationInsightsName')), parameters('principalId'), variables('monitoringReaderRoleDefinitionGuid'))]",
+              "properties": {
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('monitoringReaderRoleDefinitionGuid'))]"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.App/containerApps', parameters('consoleAppName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "apiUrl": {
+      "type": "string",
+      "value": "[if(parameters('deployContainerApp'), format('https://{0}', coalesce(tryGet(if(parameters('deployContainerApp'), reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01', 'full'), null()), 'properties', 'configuration', 'ingress', 'fqdn'), '')), '')]"
+    },
+    "registryName": {
+      "type": "string",
+      "value": "[variables('registryName')]"
+    },
+    "registryLoginServer": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), '2023-07-01').loginServer]"
+    },
+    "defaultContainerImage": {
+      "type": "string",
+      "value": "[format('{0}/{1}:{2}', reference(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), '2023-07-01').loginServer, parameters('imageRepository'), parameters('imageTag'))]"
+    },
+    "defaultConsoleImage": {
+      "type": "string",
+      "value": "[format('{0}/{1}:{2}', reference(resourceId('Microsoft.ContainerRegistry/registries', variables('registryName')), '2023-07-01').loginServer, parameters('consoleImageRepository'), parameters('consoleImageTag'))]"
+    },
+    "cosmosAccountName": {
+      "type": "string",
+      "value": "[variables('cosmosName')]"
+    },
+    "containerAppPrincipalId": {
+      "type": "string",
+      "value": "[coalesce(tryGet(if(parameters('deployContainerApp'), reference(resourceId('Microsoft.App/containerApps', variables('appName')), '2024-03-01', 'full'), null()), 'identity', 'principalId'), '')]"
+    },
+    "consoleUrl": {
+      "type": "string",
+      "value": "[if(parameters('deployConsole'), format('https://{0}', coalesce(tryGet(if(parameters('deployConsole'), reference(resourceId('Microsoft.App/containerApps', parameters('consoleAppName')), '2024-03-01', 'full'), null()), 'properties', 'configuration', 'ingress', 'fqdn'), '')), '')]"
+    },
+    "consolePrincipalId": {
+      "type": "string",
+      "value": "[coalesce(tryGet(if(parameters('deployConsole'), reference(resourceId('Microsoft.App/containerApps', parameters('consoleAppName')), '2024-03-01', 'full'), null()), 'identity', 'principalId'), '')]"
+    }
+  }
+}
