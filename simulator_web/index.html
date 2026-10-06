@@ -3,24 +3,53 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="cost-console-ui-version" content="2026-09-30.1">
   <title>Cost Budget Lab</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/styles.css?v=2026-09-30.1">
 </head>
 <body>
   <header class="topbar">
     <div>
-      <p class="eyebrow">ADMIN CONSOLE</p>
+      <p class="eyebrow">COST GOVERNANCE · BUILD 2026.09.30.1</p>
       <h1>Cost Budget Control</h1>
     </div>
-    <div class="status" id="backend-status"><span></span><b id="backend-label">Checking backend</b></div>
+    <div class="topbar-actions">
+      <div class="session-summary" id="session-summary" hidden>
+        <strong id="session-name"></strong>
+        <span id="session-access"></span>
+      </div>
+      <div class="status" id="backend-status"><span></span><b id="backend-label">Checking backend</b></div>
+      <button class="icon-button sign-out" id="sign-out" type="button" title="Sign out" aria-label="Sign out" hidden>↪</button>
+    </div>
   </header>
 
   <main>
-    <nav class="view-tabs" id="view-tabs" aria-label="Admin views" hidden>
-      <button type="button" class="active" data-view="overview">Overview</button>
+    <section class="login-view" id="login-view">
+      <div class="login-panel">
+        <p class="step">OWNER ACCESS</p>
+        <h2>Administrator sign in</h2>
+        <p class="login-copy">Owners can configure team budgets and model prices.</p>
+        <form id="owner-login-form">
+          <div class="field"><label for="owner-username">Username</label><input id="owner-username" name="username" autocomplete="username" required></div>
+          <div class="field"><label for="owner-password">Password</label><input id="owner-password" name="password" type="password" autocomplete="current-password" required></div>
+          <button class="primary-button" type="submit"><span>Sign in as owner</span><b>→</b></button>
+        </form>
+        <div class="login-divider"><span>or</span></div>
+        <p class="login-copy">Employees use Microsoft sign-in for read-only budget and consumption reports.</p>
+        <button class="microsoft-button" id="microsoft-login" type="button">
+          <span class="microsoft-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          Sign in with Microsoft
+        </button>
+        <p class="login-error" id="login-error" role="alert" hidden></p>
+      </div>
+    </section>
+
+    <div id="authenticated-app" hidden>
+    <nav class="view-tabs" id="view-tabs" aria-label="Console views" hidden>
+      <button type="button" class="active" data-view="overview">Management</button>
       <button type="button" data-view="metrics">Budget metrics</button>
       <button type="button" data-view="dashboard">FinOps dashboard</button>
     </nav>
@@ -80,12 +109,13 @@
       <aside class="side-stack">
         <section class="panel compact-panel">
           <div class="section-heading"><div><p class="step">02 / BUDGETS</p><h2>Budget policy</h2></div></div>
+            <div class="admin-scope-note" id="admin-scope-note" hidden><strong>Owner controls</strong><span>Changes apply to real enforcement.</span></div>
           <form id="default-budget-form" class="default-budget-form" hidden>
             <div class="field money-input"><label for="default-budget-limit">Default monthly USD</label><span>$</span><input id="default-budget-limit" type="number" min="0.000001" step="0.000001" required></div>
             <button class="secondary-button" type="submit">Set default</button>
           </form>
           <form id="team-budget-form" class="team-budget-form" hidden>
-            <div class="field"><label for="team-role">Team app role</label><input id="team-role" placeholder="Team.Engineering" pattern="[A-Za-z0-9._-]+" required></div>
+            <div class="field"><label for="team-role">Team app role</label><input id="team-role" placeholder="Team.Engineering" pattern="[A-Za-z0-9._\-]+" title="Use letters, numbers, dots, underscores, or hyphens." required></div>
             <div class="field money-input"><label for="team-user-limit">Per-user monthly USD</label><span>$</span><input id="team-user-limit" type="number" min="0.000001" step="0.000001" value="100.00" required></div>
             <button class="secondary-button" type="submit">Save team policy</button>
           </form>
@@ -119,7 +149,7 @@
     <section class="metrics-view" id="metrics-view" hidden>
       <div class="metrics-heading">
         <div><p class="step">CURRENT PERIOD</p><h2>Budget metrics</h2></div>
-        <span id="metrics-period">—</span>
+        <div class="metrics-heading-meta"><span id="metrics-period">—</span><span>Ledger-backed actuals</span></div>
       </div>
       <div class="metrics-summary">
         <div><span>Allocated</span><strong id="metrics-allocated">$0.000000</strong></div>
@@ -139,7 +169,13 @@
       </section>
 
       <section class="metrics-panel">
-        <div class="section-heading"><div><p class="step">USER VIEW</p><h2>User detail</h2></div></div>
+        <div class="section-heading">
+          <div><p class="step">USER VIEW</p><h2>User detail</h2></div>
+          <div class="metrics-filters">
+            <div class="field"><label for="metrics-team-filter">Team</label><select id="metrics-team-filter"><option value="">All teams</option></select></div>
+            <div class="field"><label for="metrics-user-filter">User email</label><select id="metrics-user-filter"><option value="">All users</option></select></div>
+          </div>
+        </div>
         <div class="table-wrap">
           <table class="user-metrics-table"><thead><tr><th>User</th><th>Team role</th><th>Allocated</th><th>Spent</th><th>Reserved</th><th>Remaining</th></tr></thead><tbody id="user-metrics-body"></tbody></table>
         </div>
@@ -175,6 +211,14 @@
         <div><span>Error rate</span><strong id="analytics-error-rate">0%</strong></div>
         <div><span>Cache read rate</span><strong id="analytics-cache-rate">0%</strong></div>
       </div>
+      <div class="analytics-summary" aria-label="Spend by token category">
+        <div><span>Uncached input spend</span><strong id="analytics-input-spend">$0.000000</strong></div>
+        <div><span>Output spend</span><strong id="analytics-output-spend">$0.000000</strong></div>
+        <div><span>Cache-write spend</span><strong id="analytics-cache-write-spend">$0.000000</strong></div>
+        <div><span>Cache-read spend</span><strong id="analytics-cache-read-spend">$0.000000</strong></div>
+        <div><span>Unallocated / rounding</span><strong id="analytics-unallocated-spend">$0.000000</strong></div>
+        <div><span>Unsettled requests</span><strong id="analytics-unsettled">0</strong></div>
+      </div>
 
       <section class="dashboard-pane" data-dashboard-pane="summary">
         <div class="analytics-grid overview-analytics-grid">
@@ -197,6 +241,7 @@
           </section>
           <section class="analytics-panel">
             <div class="section-heading"><div><p class="step">APPLICATION ALLOCATION</p><h2>Consumption by app</h2></div></div>
+            <p class="analytics-explanation">Applications are the authenticated Entra client IDs, not individual Cowork conversations.</p>
             <div class="table-wrap"><table><thead><tr><th>Application</th><th>Requests</th><th>Tokens</th><th>Spend</th><th>Error rate</th></tr></thead><tbody id="analytics-app-body"></tbody></table></div>
           </section>
         </div>
@@ -225,10 +270,12 @@
       <section class="dashboard-pane" data-dashboard-pane="users" hidden>
         <section class="analytics-panel">
           <div class="section-heading"><div><p class="step">UNIT ECONOMICS</p><h2>User consumption detail</h2></div></div>
+          <p class="analytics-explanation">One row per user, team, and application. Requests count gateway model calls, not chat turns.</p>
           <div class="table-wrap"><table class="analytics-user-table"><thead><tr><th>User</th><th>Team</th><th>Application</th><th>Requests</th><th>Tokens</th><th>Spend</th><th>P95</th></tr></thead><tbody id="analytics-user-body"></tbody></table></div>
         </section>
       </section>
     </section>
+    </div>
   </main>
 
   <dialog id="price-dialog">
@@ -247,6 +294,7 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/msal-browser.min.js?v=4.28.1"></script>
+  <script src="/assets/app.js?v=2026-09-30.1"></script>
 </body>
 </html>

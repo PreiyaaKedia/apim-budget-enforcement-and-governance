@@ -8,6 +8,7 @@ from app.pricing import (
     PriceRates,
     calculate_cost_usd,
     calculate_reservation_usd,
+    cost_breakdown_usd,
     normalize_usage,
 )
 
@@ -66,6 +67,23 @@ def test_openai_rejects_overlapping_cache_buckets() -> None:
 
 def test_reservation_uses_highest_possible_input_rate() -> None:
     assert calculate_reservation_usd(800, 300, RATES) == Decimal('0.004400')
+
+
+def test_cache_spend_breakdown_uses_catalog_rates_without_double_counting() -> None:
+    usage = normalize_usage({
+        "input_tokens": 600,
+        "cache_creation_input_tokens": 100,
+        "cache_read_input_tokens": 200,
+        "output_tokens": 300,
+    })
+    breakdown = cost_breakdown_usd(usage, RATES)
+    assert breakdown == {
+        "input": Decimal("0.0012"),
+        "output": Decimal("0.0024"),
+        "cacheWrite": Decimal("0.00025"),
+        "cacheRead": Decimal("0.0001"),
+    }
+    assert sum(breakdown.values()) == calculate_cost_usd(usage, RATES)
 
 
 def test_usd_response_serializes_decimal_as_string() -> None:

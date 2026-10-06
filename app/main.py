@@ -28,7 +28,7 @@ from app.models import (
     TeamBudgetUpdate,
     UserBudgetUpdate,
 )
-from app.pricing import TokenUsage, calculate_cost_usd, calculate_reservation_usd
+from app.pricing import TokenUsage, calculate_cost_usd, calculate_reservation_usd, cost_breakdown_usd
 from app.repository import (
     CosmosLedger,
     LedgerConflictError,
@@ -197,8 +197,13 @@ def create_app() -> FastAPI:
                 output_tokens=request.output_tokens,
                 schema="normalized",
             )
-            actual = calculate_cost_usd(usage, rates_from_price(price))
-            return ledger.settle(reservation_id, actual, request.model_dump(by_alias=True))
+            rates = rates_from_price(price)
+            actual = calculate_cost_usd(usage, rates)
+            settlement_usage = request.model_dump(by_alias=True)
+            settlement_usage["spendBreakdown"] = {
+                key: format(value, "f") for key, value in cost_breakdown_usd(usage, rates).items()
+            }
+            return ledger.settle(reservation_id, actual, settlement_usage)
         except ReservationNotFoundError as exc:
             raise HTTPException(status_code=404, detail="reservation not found") from exc
         except (PriceNotFoundError, AmbiguousPriceError) as exc:

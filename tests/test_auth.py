@@ -10,6 +10,8 @@ def authenticated_client(monkeypatch, claims: dict) -> TestClient:
     monkeypatch.setenv("TENANT_ID", "tenant-id")
     monkeypatch.setenv("AUDIENCE", "cost-api")
     monkeypatch.setenv("ALLOWED_CLIENT_ID", "apim-mi")
+    monkeypatch.setenv("ADMIN_ALLOWED_PRINCIPAL_ID", "console-principal")
+    monkeypatch.setenv("ADMIN_REQUIRED_ROLE", "CostEnforcement.Admin")
     api = FastAPI()
 
     @api.get("/v1/reservations")
@@ -65,13 +67,57 @@ def test_admin_route_can_be_explicitly_unprotected_for_prototype(monkeypatch) ->
     assert response.status_code == 200
 
 
-def test_admin_route_accepts_shared_key_without_user_token(monkeypatch) -> None:
-    monkeypatch.setenv("ADMIN_API_KEY", "test-admin-key")
-    client = authenticated_client(monkeypatch, {})
+def test_admin_route_accepts_console_managed_identity(monkeypatch) -> None:
+    client = authenticated_client(
+        monkeypatch,
+        {
+            "iss": "https://login.microsoftonline.com/tenant-id/v2.0",
+            "azp": "console-client",
+            "tid": "tenant-id",
+            "oid": "console-principal",
+            "roles": ["CostEnforcement.Admin"],
+        },
+    )
 
     try:
-        response = client.get("/v1/admin/budget/default", headers={"X-Admin-Key": "test-admin-key"})
+        response = client.get("/v1/admin/budget/default", headers={"Authorization": "Bearer token"})
     finally:
         client._decode_patcher.stop()
 
     assert response.status_code == 200
+
+
+def test_admin_route_rejects_missing_application_role(monkeypatch) -> None:
+    client = authenticated_client(
+        monkeypatch,
+        {
+            "iss": "https://login.microsoftonline.com/tenant-id/v2.0",
+            "oid": "console-principal",
+            "roles": [],
+        },
+    )
+
+    try:
+        response = client.get("/v1/admin/budget/default", headers={"Authorization": "Bearer token"})
+    finally:
+        client._decode_patcher.stop()
+
+    assert response.status_code == 401
+
+
+def test_admin_route_rejects_unapproved_managed_identity(monkeypatch) -> None:
+    client = authenticated_client(
+        monkeypatch,
+        {
+            "iss": "https://login.microsoftonline.com/tenant-id/v2.0",
+            "oid": "other-principal",
+            "roles": ["CostEnforcement.Admin"],
+        },
+    )
+
+    try:
+        response = client.get("/v1/admin/budget/default", headers={"Authorization": "Bearer token"})
+    finally:
+        client._decode_patcher.stop()
+
+    assert response.status_code == 401

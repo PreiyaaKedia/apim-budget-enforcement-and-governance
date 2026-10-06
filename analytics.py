@@ -58,6 +58,9 @@ class AzureMonitorAnalytics:
                 _gateway_usage_query(safe_days),
                 timespan=timedelta(days=safe_days),
             )
+        partial_error = getattr(response, "partial_error", None)
+        if partial_error is not None:
+            raise RuntimeError(f"Azure Monitor returned incomplete usage data: {partial_error}")
         tables = getattr(response, "tables", [])
         if not tables:
             return _aggregate([], safe_days, team, app, model)
@@ -85,31 +88,18 @@ let RequestLatency = requests
     by operation_Id;
 traces
 | where timestamp >= ago({days}d)
-| where message == "llm-request"
+| where message in ("llm-request", "llm-usage: llm-request")
 | extend Metadata = todynamic(customDimensions)
 | project
     timestamp,
     operation_Id,
-    correlationId = tostring(Metadata.correlationId),
-    teamRole = tostring(Metadata.teamRole),
-    appId = tostring(Metadata.appId),
-    deployment = tostring(Metadata.deployment),
-    model = tostring(Metadata.model),
-    userKey = tostring(Metadata.userKey),
-    userEmail = tostring(Metadata.userEmail),
-    userName = tostring(Metadata.userName),
-    status = toint(Metadata.status),
-    inputTokens = tolong(Metadata.inputTokens),
-    outputTokens = tolong(Metadata.completionTokens),
-    cacheWriteTokens = tolong(Metadata.cacheWriteTokens),
-    cacheReadTokens = tolong(Metadata.cacheReadTokens),
-    actualUsd = todouble(Metadata.actualUsd),
-    servedBy = tostring(Metadata.servedBy)
-| extend totalTokens = inputTokens + outputTokens + cacheWriteTokens + cacheReadTokens
+    {_usage_projection()},
+    totalTokens = tolong(coalesce(Metadata.totalTokens, Metadata["prop__totalTokens"]))
 | join kind=leftouter RequestLatency on operation_Id
 | extend
     latencyMs = coalesce(todouble(latencyMs), 0.0),
-    status = coalesce(status, requestResultCode)
+    status = coalesce(status, requestResultCode),
+    correlationId = iff(isempty(correlationId), operation_Id, correlationId)
 | project-away operation_Id1, requestResultCode
 | order by timestamp desc
 | take 20001
@@ -127,27 +117,46 @@ ApiManagementGatewayLogs
 | extend Metadata = coalesce(TraceRecord.metadata, TraceRecord.Metadata, TraceRecord.data, TraceRecord.Data)
 | project
     timestamp = TimeGenerated,
-    correlationId = CorrelationId,
-    teamRole = tostring(coalesce(Metadata.teamRole, Metadata["teamRole"])),
-    appId = tostring(coalesce(Metadata.appId, Metadata["appId"])),
-    deployment = tostring(coalesce(Metadata.deployment, Metadata["deployment"])),
-    model = tostring(coalesce(Metadata.model, Metadata["model"])),
-    userKey = tostring(coalesce(Metadata.userKey, Metadata["userKey"])),
-    userEmail = tostring(coalesce(Metadata.userEmail, Metadata["userEmail"])),
-    userName = tostring(coalesce(Metadata.userName, Metadata["userName"])),
-    status = toint(coalesce(Metadata.status, Metadata["status"])),
-    inputTokens = tolong(coalesce(Metadata.inputTokens, Metadata["inputTokens"])),
-    outputTokens = tolong(coalesce(Metadata.completionTokens, Metadata["completionTokens"])),
-    cacheWriteTokens = tolong(coalesce(Metadata.cacheWriteTokens, Metadata["cacheWriteTokens"])),
-    cacheReadTokens = tolong(coalesce(Metadata.cacheReadTokens, Metadata["cacheReadTokens"])),
+    {_usage_projection(correlation_fallback="tostring(CorrelationId)")},
     totalTokens = tolong(coalesce(Metadata.totalTokens, Metadata["totalTokens"])),
-    actualUsd = todouble(coalesce(Metadata.actualUsd, Metadata["actualUsd"])),
-    servedBy = tostring(coalesce(Metadata.servedBy, Metadata["servedBy"])),
     latencyMs = tolong(TotalTime),
     backendLatencyMs = tolong(BackendTime)
 | order by timestamp desc
 | take 20001
 """.strip()
+
+
+def _usage_projection(correlation_fallback: str = '""') -> str:
+    fields = {
+        "correlationId": ("correlationId", "tostring"),
+        "teamRole": ("teamRole", "tostring"),
+        "appId": ("appId", "tostring"),
+        "deployment": ("deployment", "tostring"),
+        "model": ("model", "tostring"),
+        "userKey": ("userKey", "tostring"),
+        "userEmail": ("userEmail", "tostring"),
+        "userName": ("userName", "tostring"),
+        "status": ("status", "toint"),
+        "inputTokens": ("inputTokens", "tolong"),
+        "outputTokens": ("completionTokens", "tolong"),
+        "cacheWriteTokens": ("cacheWriteTokens", "tolong"),
+        "cacheReadTokens": ("cacheReadTokens", "tolong"),
+        "inputUsd": ("inputUsd", "todouble"),
+        "outputUsd": ("outputUsd", "todouble"),
+        "cacheWriteUsd": ("cacheWriteUsd", "todouble"),
+        "cacheReadUsd": ("cacheReadUsd", "todouble"),
+        "actualUsd": ("actualUsd", "todouble"),
+        "servedBy": ("servedBy", "tostring"),
+        "usageState": ("usageState", "tostring"),
+        "settlementState": ("settlementState", "tostring"),
+    }
+    projections = []
+    for target, (source, conversion) in fields.items():
+        value = f'coalesce(Metadata.{source}, Metadata["prop__{source}"])'
+        if target == "correlationId":
+            value = f"coalesce({value}, {correlation_fallback})"
+        projections.append(f"{target} = {conversion}({value})")
+    return ",\n    ".join(projections)
 
 
 def _aggregate(
@@ -159,6 +168,23 @@ def _aggregate(
 ) -> dict[str, Any]:
     truncated = len(records) > 20000
     records = records[:20000]
+    # Duplicate ingestion is not an additional model request. Do not collapse
+    # different gateway correlation IDs (Cowork can make many calls per turn).
+    deduplicated: dict[str, dict[str, Any]] = {}
+    anonymous = []
+    for record in records:
+        row = dict(record)
+        buckets = ("inputTokens", "outputTokens", "cacheWriteTokens", "cacheReadTokens")
+        if any(_number(row.get(key)) > 0 for key in buckets) or row.get("usageState") == "available":
+            row["totalTokens"] = sum(_number(row.get(key)) for key in buckets)
+        correlation = str(row.get("correlationId") or "")
+        if not correlation:
+            anonymous.append(row)
+            continue
+        previous = deduplicated.get(correlation)
+        if previous is None or _record_quality(row) > _record_quality(previous):
+            deduplicated[correlation] = row
+    records = list(deduplicated.values()) + anonymous
     filter_values = {
         "teams": sorted({str(row.get("teamRole") or "Unassigned") for row in records}),
         "apps": sorted({str(row.get("appId") or "Unknown") for row in records}),
@@ -173,7 +199,12 @@ def _aggregate(
     summary = _metrics(filtered)
     return {
         "available": True,
-        "reason": "" if records else "No APIM usage telemetry was found in the selected period.",
+        "reason": (
+            f"{summary['unsettledRequests']} request(s) have no confirmed actual cost; "
+            "streaming requires a streaming-aware settlement path. Totals exclude unknown usage/cost."
+            if summary["unsettledRequests"]
+            else "" if records else "No APIM usage telemetry was found in the selected period."
+        ),
         "rangeDays": days,
         "truncated": truncated,
         "summary": summary,
@@ -185,6 +216,14 @@ def _aggregate(
         "users": _users(filtered),
         "filters": filter_values,
     }
+
+
+def _record_quality(row: dict[str, Any]) -> tuple[bool, bool, str]:
+    return (
+        row.get("actualUsd") not in (None, ""),
+        row.get("usageState") == "available" or _number(row.get("totalTokens")) > 0,
+        str(row.get("timestamp") or ""),
+    )
 
 
 def _metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -203,6 +242,24 @@ def _metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         "p95LatencyMs": round(_percentile(latencies, 0.95), 1),
         "errorRate": round(failures / requests * 100, 1) if requests else 0,
         "cacheReadRate": round(cache_reads / input_side_tokens * 100, 1) if input_side_tokens else 0,
+        "unsettledRequests": sum(
+            row.get("actualUsd") in (None, "")
+            or row.get("settlementState") in (
+                "settlement_failed", "streaming_unsettled", "missing_usage", "invalid_response",
+            )
+            for row in records
+        ),
+        "spendBreakdown": {
+            "input": round(sum(_number(row.get("inputUsd")) for row in records), 9),
+            "output": round(sum(_number(row.get("outputUsd")) for row in records), 9),
+            "cacheWrite": round(sum(_number(row.get("cacheWriteUsd")) for row in records), 9),
+            "cacheRead": round(sum(_number(row.get("cacheReadUsd")) for row in records), 9),
+            "unallocated": round(sum(
+                _number(row.get("actualUsd")) - sum(
+                    _number(row.get(key)) for key in ("inputUsd", "outputUsd", "cacheWriteUsd", "cacheReadUsd")
+                ) for row in records
+            ), 9),
+        },
     }
 
 
@@ -239,21 +296,21 @@ def _trend(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _users(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in records:
         identity = str(row.get("userEmail") or row.get("userKey") or "Unknown")
-        groups[identity].append(row)
+        groups[(identity, str(row.get("teamRole") or "Unassigned"), str(row.get("appId") or "Unknown"))].append(row)
     result = []
-    for identity, rows in groups.items():
+    for (identity, team_role, app_id), rows in groups.items():
         latest = rows[0]
         result.append({
             "identity": identity,
             "name": str(latest.get("userName") or ""),
-            "teamRole": str(latest.get("teamRole") or "Unassigned"),
-            "appId": str(latest.get("appId") or "Unknown"),
+            "teamRole": team_role,
+            "appId": app_id,
             **_metrics(rows),
         })
-    return sorted(result, key=lambda item: (-item["spendUsd"], -item["tokens"], item["identity"]))
+    return sorted(result, key=lambda item: (-item["spendUsd"], -item["tokens"], item["identity"], item["appId"]))
 
 
 def _latency_distribution(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -1,6 +1,12 @@
-const state = { users: {}, teams: {}, prices: {}, history: [], budgetMetrics: { period: "", teams: [], users: [] }, analytics: null, activeUser: "", activeView: "overview", activeDashboardTab: "summary", backendMode: "simulation", backendCompatible: true, backendError: "", defaultLimitUsd: null };
+const UI_VERSION = "2026-09-30.1";
+const state = { users: {}, teams: {}, prices: {}, history: [], budgetMetrics: { period: "", teams: [], users: [] }, analytics: null, session: null, metricsTeam: "", metricsUser: "", activeUser: "", activeView: "overview", activeDashboardTab: "summary", backendMode: "simulation", backendCompatible: true, backendError: "", defaultLimitUsd: null };
 const byId = (id) => document.getElementById(id);
-const money = (value) => `$${Number(value || 0).toFixed(6)}`;
+let microsoftClient = null;
+let microsoftConfig = null;
+const money = (value) => {
+  const amount = Number(value || 0);
+  return `$${amount.toFixed(Math.abs(amount) >= 1 ? 2 : 6)}`;
+};
 const integer = (value) => Number(value || 0).toLocaleString();
 const milliseconds = (value) => `${integer(Math.round(Number(value || 0)))} ms`;
 const percent = (value) => `${Number(value || 0).toFixed(1)}%`;
@@ -12,17 +18,76 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     const problem = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(typeof problem.detail === "string" ? problem.detail : JSON.stringify(problem.detail));
+    const error = new Error(typeof problem.detail === "string" ? problem.detail : JSON.stringify(problem.detail));
+    error.status = response.status;
+    if (response.status === 401 && state.session) showLogin(new Error("Your session expired. Sign in again."));
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
 
 async function refresh(preferredUser = state.activeUser) {
+  const session = await api("/api/session");
+  state.session = session;
   const snapshot = await api("/api/state");
+  state.session = session;
   Object.assign(state, snapshot);
   const userIds = Object.keys(state.users).sort();
   state.activeUser = userIds.includes(preferredUser) ? preferredUser : (userIds[0] || "");
+  byId("login-view").hidden = true;
+  byId("authenticated-app").hidden = false;
+  byId("sign-out").hidden = false;
+  byId("session-summary").hidden = false;
   render();
+}
+
+async function getMicrosoftClient() {
+  if (microsoftClient) return microsoftClient;
+  if (!window.msal?.PublicClientApplication) throw new Error("Microsoft sign-in failed to load. Refresh the page and try again.");
+  const response = await fetch("/api/auth/microsoft/config", { cache: "no-store" });
+  if (!response.ok) {
+    const problem = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(problem.detail || "Microsoft sign-in is not configured.");
+  }
+  microsoftConfig = await response.json();
+  microsoftClient = new window.msal.PublicClientApplication({
+    auth: {
+      clientId: microsoftConfig.clientId,
+      authority: microsoftConfig.authority,
+      redirectUri: window.location.origin,
+      navigateToLoginRequestUrl: false,
+    },
+    cache: {
+      cacheLocation: "sessionStorage",
+      storeAuthStateInCookie: false,
+    },
+  });
+  await microsoftClient.initialize();
+  return microsoftClient;
+}
+
+async function completeMicrosoftRedirect() {
+  const client = await getMicrosoftClient();
+  const result = await client.handleRedirectPromise();
+  if (!result?.idToken) return;
+  await api("/api/auth/microsoft", {
+    method: "POST",
+    body: JSON.stringify({ id_token: result.idToken }),
+  });
+}
+
+function showLogin(error = null) {
+  state.session = null;
+  byId("authenticated-app").hidden = true;
+  byId("sign-out").hidden = true;
+  byId("session-summary").hidden = true;
+  byId("login-view").hidden = false;
+  byId("backend-status").className = "status signed-out";
+  byId("backend-label").textContent = "Sign in required";
+  const message = byId("login-error");
+  const visibleError = error && (error.status === 403 || error.status !== 401);
+  message.hidden = !visibleError;
+  message.textContent = visibleError ? error.message : "";
 }
 
 function render() {
@@ -38,34 +103,42 @@ function render() {
 
 function renderMode() {
   const live = state.backendMode === "live";
+  const isAdmin = state.session?.isAdmin === true;
   const compatible = state.backendCompatible !== false;
+  if (live && !isAdmin && state.activeView === "overview") state.activeView = "metrics";
   const metricsView = live && state.activeView === "metrics";
   const dashboardView = live && state.activeView === "dashboard";
   document.body.classList.toggle("live-admin", live);
+  document.body.classList.toggle("owner-session", isAdmin);
+  byId("session-name").textContent = state.session?.name || state.session?.email || "";
+  byId("session-access").textContent = isAdmin ? "Owner · full access" : "Employee · read only";
   byId("backend-status").className = `status ${live ? (compatible ? "live" : "incompatible") : "simulation"}`;
   byId("backend-label").textContent = live ? (compatible ? "Real enforcement" : "Backend update required") : "Local simulation";
   byId("live-probe-fields").hidden = !live;
   byId("simulation-fields").hidden = live;
   byId("default-budget-form").hidden = true;
-  byId("team-budget-form").hidden = !live;
-  byId("team-budget-note").hidden = !live;
-  byId("team-list").hidden = !live;
+  byId("team-budget-form").hidden = !live || !isAdmin;
+  byId("team-budget-note").hidden = !live || !isAdmin;
+  byId("team-list").hidden = !live || !isAdmin;
+  byId("admin-scope-note").hidden = !live || !isAdmin;
   byId("budget-form").hidden = live;
   byId("account-list").hidden = live;
   byId("reset-budget").hidden = live;
   byId("rate-preview").hidden = live;
   byId("scenario-panel").hidden = live;
   byId("view-tabs").hidden = !live;
-  byId("overview-view").hidden = metricsView || dashboardView;
+  byId("view-tabs").querySelector('[data-view="overview"]').hidden = !isAdmin;
+  byId("overview-view").hidden = metricsView || dashboardView || (live && !isAdmin);
   byId("metrics-view").hidden = !metricsView;
   byId("dashboard-view").hidden = !dashboardView;
-  byId("pricing-panel").hidden = false;
+  byId("pricing-panel").hidden = live && !isAdmin;
   byId("history-section").hidden = live;
   byId("check-button-label").textContent = live ? "Probe real budget" : "Run simulated check";
   byId("team-budget-note").textContent = compatible
     ? "Every caller assigned to this app role receives an independent monthly allowance."
     : state.backendError;
   for (const control of byId("team-budget-form").elements) control.disabled = live && !compatible;
+  for (const tab of byId("view-tabs").querySelectorAll("button")) tab.classList.toggle("active", tab.dataset.view === state.activeView);
 }
 
 async function refreshAnalytics() {
@@ -89,6 +162,13 @@ function renderAnalytics() {
   byId("analytics-p95").textContent = milliseconds(summary.p95LatencyMs);
   byId("analytics-error-rate").textContent = percent(summary.errorRate);
   byId("analytics-cache-rate").textContent = percent(summary.cacheReadRate);
+  const breakdown = summary.spendBreakdown || {};
+  byId("analytics-input-spend").textContent = money(breakdown.input);
+  byId("analytics-output-spend").textContent = money(breakdown.output);
+  byId("analytics-cache-write-spend").textContent = money(breakdown.cacheWrite);
+  byId("analytics-cache-read-spend").textContent = money(breakdown.cacheRead);
+  byId("analytics-unallocated-spend").textContent = money(breakdown.unallocated);
+  byId("analytics-unsettled").textContent = integer(summary.unsettledRequests);
   const notice = byId("analytics-notice");
   notice.hidden = report.available && !report.reason && !report.truncated;
   notice.className = `analytics-notice ${report.available ? "empty" : "unavailable"}`;
@@ -167,7 +247,39 @@ function renderLatencyDistribution(buckets, average) {
 
 function renderMetrics() {
   const report = state.budgetMetrics || { period: "", teams: [], users: [] };
-  const totals = report.teams.reduce((result, team) => ({
+  const teamRoles = [...new Set([
+    ...report.teams.map((team) => team.teamRole),
+    ...report.users.map((user) => user.teamRole),
+  ].filter(Boolean))].sort();
+  if (state.metricsTeam && !teamRoles.includes(state.metricsTeam)) state.metricsTeam = "";
+  const teamFilter = byId("metrics-team-filter");
+  teamFilter.innerHTML = `<option value="">All teams</option>${teamRoles.map((role) => `<option value="${escapeHtml(role)}">${escapeHtml(role)}</option>`).join("")}`;
+  teamFilter.value = state.metricsTeam;
+  const teamUsers = state.metricsTeam
+    ? report.users.filter((user) => user.teamRole === state.metricsTeam)
+    : report.users;
+  const userOptions = teamUsers.map((user) => ({
+    value: user.userKey,
+    label: user.userEmail || user.userKey,
+  })).sort((a, b) => a.label.localeCompare(b.label));
+  if (state.metricsUser && !userOptions.some((user) => user.value === state.metricsUser)) state.metricsUser = "";
+  const userFilter = byId("metrics-user-filter");
+  userFilter.innerHTML = `<option value="">All users</option>${userOptions.map((user) => `<option value="${escapeHtml(user.value)}">${escapeHtml(user.label)}</option>`).join("")}`;
+  userFilter.value = state.metricsUser;
+  const visibleUsers = state.metricsUser
+    ? teamUsers.filter((user) => user.userKey === state.metricsUser)
+    : teamUsers;
+  const visibleTeams = state.metricsTeam
+    ? report.teams.filter((team) => team.teamRole === state.metricsTeam)
+    : report.teams;
+  const totals = visibleUsers.length && (state.metricsTeam || state.metricsUser)
+    ? visibleUsers.reduce((result, user) => ({
+        allocated: result.allocated + Number(user.allocatedUsd || 0),
+        spent: result.spent + Number(user.spentUsd || 0),
+        reserved: result.reserved + Number(user.reservedUsd || 0),
+        remaining: result.remaining + Number(user.remainingUsd || 0),
+      }), { allocated: 0, spent: 0, reserved: 0, remaining: 0 })
+    : visibleTeams.reduce((result, team) => ({
     allocated: result.allocated + Number(team.allocatedUsd || 0),
     spent: result.spent + Number(team.spentUsd || 0),
     reserved: result.reserved + Number(team.reservedUsd || 0),
@@ -178,12 +290,12 @@ function renderMetrics() {
   byId("metrics-spent").textContent = money(totals.spent);
   byId("metrics-reserved").textContent = money(totals.reserved);
   byId("metrics-remaining").textContent = money(totals.remaining);
-  byId("team-metrics-body").innerHTML = report.teams.length
-    ? report.teams.map((team) => `<tr><td><strong>${escapeHtml(team.teamRole)}</strong></td><td class="mono">${integer(team.activeUsers)}</td><td class="mono">${money(team.allocatedUsd)}</td><td class="mono">${money(team.spentUsd)}</td><td class="mono">${money(team.reservedUsd)}</td><td class="mono remaining-value">${money(team.remainingUsd)}</td></tr>`).join("")
-    : '<tr><td colspan="6" class="empty-row">No team policies are configured.</td></tr>';
-  byId("user-metrics-body").innerHTML = report.users.length
-    ? report.users.map((user) => `<tr><td><strong title="${escapeHtml(user.userEmail || user.userKey)}">${escapeHtml(user.userEmail || user.userKey)}</strong>${user.userName ? `<small>${escapeHtml(user.userName)}</small>` : ""}</td><td>${escapeHtml(user.teamRole)}</td><td class="mono">${money(user.allocatedUsd)}</td><td class="mono">${money(user.spentUsd)}</td><td class="mono">${money(user.reservedUsd)}</td><td class="mono remaining-value">${money(user.remainingUsd)}</td></tr>`).join("")
-    : '<tr><td colspan="6" class="empty-row">Users appear after their first budgeted request this month.</td></tr>';
+  byId("team-metrics-body").innerHTML = visibleTeams.length
+    ? visibleTeams.map((team) => `<tr><td><strong>${escapeHtml(team.teamRole)}</strong></td><td class="mono">${integer(team.activeUsers)}</td><td class="mono">${money(team.allocatedUsd)}</td><td class="mono">${money(team.spentUsd)}</td><td class="mono">${money(team.reservedUsd)}</td><td class="mono remaining-value">${money(team.remainingUsd)}</td></tr>`).join("")
+    : '<tr><td colspan="6" class="empty-row">No budget activity exists for this period.</td></tr>';
+  byId("user-metrics-body").innerHTML = visibleUsers.length
+    ? visibleUsers.map((user) => `<tr><td><strong title="${escapeHtml(user.userEmail || user.userKey)}">${escapeHtml(user.userEmail || user.userKey)}</strong>${user.userName ? `<small>${escapeHtml(user.userName)}</small>` : ""}</td><td>${escapeHtml(user.teamRole)}</td><td class="mono">${money(user.allocatedUsd)}</td><td class="mono">${money(user.spentUsd)}</td><td class="mono">${money(user.reservedUsd)}</td><td class="mono remaining-value">${money(user.remainingUsd)}</td></tr>`).join("")
+    : `<tr><td colspan="6" class="empty-row">${state.metricsTeam ? "No active users in this team." : "Users appear after their first budgeted request this month."}</td></tr>`;
 }
 
 function renderTeams() {
@@ -409,6 +521,15 @@ byId("view-tabs").addEventListener("click", (event) => {
   renderMode();
   if (state.activeView === "dashboard" && !state.analytics) refreshAnalytics().catch((error) => toast(error.message));
 });
+byId("metrics-team-filter").addEventListener("change", (event) => {
+  state.metricsTeam = event.target.value;
+  state.metricsUser = "";
+  renderMetrics();
+});
+byId("metrics-user-filter").addEventListener("change", (event) => {
+  state.metricsUser = event.target.value;
+  renderMetrics();
+});
 byId("dashboard-filters").addEventListener("submit", (event) => {
   event.preventDefault();
   refreshAnalytics().catch((error) => toast(error.message));
@@ -421,4 +542,53 @@ byId("dashboard-tabs").addEventListener("click", (event) => {
   for (const pane of document.querySelectorAll("[data-dashboard-pane]")) pane.hidden = pane.dataset.dashboardPane !== state.activeDashboardTab;
 });
 
-refresh().catch((error) => toast(error.message));
+byId("owner-login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submit = event.currentTarget.querySelector("button[type='submit']");
+  submit.disabled = true;
+  try {
+    await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({
+        username: byId("owner-username").value,
+        password: byId("owner-password").value,
+      }),
+    });
+    byId("owner-password").value = "";
+    await refresh();
+  } catch (error) {
+    const message = byId("login-error");
+    message.textContent = error.message;
+    message.hidden = false;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+byId("microsoft-login").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const client = await getMicrosoftClient();
+    await client.loginRedirect({ scopes: microsoftConfig.scopes });
+  } catch (error) {
+    const message = byId("login-error");
+    message.textContent = error.message;
+    message.hidden = false;
+    button.disabled = false;
+  }
+});
+
+byId("sign-out").addEventListener("click", async () => {
+  await api("/api/auth/logout", { method: "POST" }).catch(() => null);
+  if (microsoftClient) await microsoftClient.clearCache().catch(() => null);
+  window.location.assign("/");
+});
+
+if (document.querySelector('meta[name="cost-console-ui-version"]')?.content !== UI_VERSION) {
+  document.body.innerHTML = '<main class="upgrade-required"><section><p class="step">UPDATE REQUIRED</p><h1>Console assets are out of sync</h1><p>Deploy the console image again, then refresh this page. Management controls are disabled until the HTML and JavaScript versions match.</p></section></main>';
+} else {
+  completeMicrosoftRedirect()
+    .then(() => refresh().catch(showLogin))
+    .catch(showLogin);
+}

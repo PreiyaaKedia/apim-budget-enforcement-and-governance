@@ -1,0 +1,7 @@
+{
+  "name": "cost-budget-console-web",
+  "private": true,
+  "dependencies": {
+    "@azure/msal-browser": "4.28.1"
+  }
+}

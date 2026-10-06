@@ -1,0 +1,15 @@
+.git
+.local
+.pytest_cache
+.venv
+**/__pycache__
+**/*.pyc
+**/.env
+**/.env.*
+infra
+scripts
+docs
+tests
+policy.xml
+README.md
+node_modules

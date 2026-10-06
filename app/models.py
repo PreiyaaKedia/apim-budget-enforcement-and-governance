@@ -55,6 +55,7 @@ class SettlementResponse(ApiModel):
     actual_usd: Decimal
     released_usd: Decimal
     remaining_usd: Decimal
+    spend_breakdown: dict[str, Decimal] | None = None
 
 
 class BudgetUpdate(ApiModel):

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": {
+      "value": "dev"
+    },
+    "audience": {
+      "value": "fd4ee8ef-65be-42e5-8702-aa840ef8e22e"
+    },
+    "apimManagedIdentityClientId": {
+      "value": "4ad11483-5daa-4066-ac34-770f3d468f54"
+    },
+    "consoleClientId": {
+      "value": "00000000-0000-0000-0000-000000000000"
+    },
+    "consoleAllowedEmailDomains": {
+      "value": [
+        "microsoft.com"
+      ]
+    },
+    "consoleOwnerUsername": {
+      "value": "validation-owner"
+    },
+    "consoleOwnerPasswordHash": {
+      "value": "validation-only-not-a-real-password-hash"
+    },
+    "consoleOwnerSessionSecret": {
+      "value": "validation-only-not-a-real-session-secret"
+    },
+    "applicationInsightsResourceId": {
+      "value": "/subscriptions/8cebb108-a4d5-402b-a0c4-f7556126277f/resourceGroups/rg-a2a-dev/providers/Microsoft.Insights/components/dev-multiagent-ai"
+    },
+    "imageTag": {
+      "value": "managed-identity-v1"
+    },
+    "consoleImageTag": {
+      "value": "managed-identity-v1"
+    },
+    "deployContainerApp": {
+      "value": true
+    },
+    "deployConsole": {
+      "value": true
+    }
+  }
+}

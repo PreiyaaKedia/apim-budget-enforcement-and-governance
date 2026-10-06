@@ -51,9 +51,8 @@ class FakeContainer:
             and (
                 ("team-budget" in query and item.get("type") == "team-budget")
                 or (
-                    "limitSource = 'team-policy'" in query
+                    "c.type = 'budget'" in query
                     and item.get("type") == "budget"
-                    and item.get("limitSource") == "team-policy"
                     and (period_suffix is None or item.get("partitionKey", "").endswith(period_suffix))
                 )
                 or (
@@ -84,6 +83,71 @@ def test_reserve_and_settle_are_idempotent() -> None:
     assert settled.released_usd == Decimal('0.001500')
     assert settled.remaining_usd == Decimal('0.007500')
     assert container.batch_count == 2
+
+
+def test_spend_breakdown_survives_idempotent_settlement() -> None:
+    ledger = CosmosLedger(FakeContainer(), monthly_limit_usd=Decimal("1"))
+    reservation = ledger.reserve("breakdown", "user", Decimal("0.1"), {"deployment": "model-a"})
+    usage = {"spendBreakdown": {"input": "0.01", "output": "0.02", "cacheWrite": "0.005", "cacheRead": "0.001"}}
+    first = ledger.settle(reservation.reservation_id, Decimal("0.036"), usage)
+    duplicate = ledger.settle(reservation.reservation_id, Decimal("0.036"), {})
+    assert duplicate == first
+    assert first.model_dump(mode="json", by_alias=True)["spendBreakdown"] == usage["spendBreakdown"]
+
+
+def test_settlement_api_emits_authoritative_cache_spend(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    container = FakeContainer()
+    database = SimpleNamespace(get_container_client=lambda _name: container)
+    monkeypatch.setenv("COSMOS_ENDPOINT", "https://example.invalid")
+    monkeypatch.setenv("AUTH_DISABLED", "true")
+    monkeypatch.setattr("azure.identity.DefaultAzureCredential", lambda: None)
+    monkeypatch.setattr("azure.cosmos.CosmosClient", lambda *_args, **_kwargs: SimpleNamespace(
+        get_database_client=lambda _name: database,
+    ))
+    from app import main
+
+    monkeypatch.setattr(main, "DefaultAzureCredential", lambda: None)
+    monkeypatch.setattr(main, "CosmosClient", lambda *_args, **_kwargs: SimpleNamespace(
+        get_database_client=lambda _name: database,
+    ))
+    price = SimpleNamespace(
+        id="claude-price",
+        max_output_tokens=1000,
+        input_usd_per_million=Decimal("2"),
+        output_usd_per_million=Decimal("8"),
+        cache_write_usd_per_million=Decimal("2.5"),
+        cache_read_usd_per_million=Decimal("0.5"),
+    )
+    monkeypatch.setattr(main, "PriceCatalog", lambda _container: SimpleNamespace(get=lambda *_args: price))
+    client = TestClient(main.create_app())
+    reservation = client.post("/v1/reservations", json={
+        "operationId": "claude-request",
+        "callerKey": "user:tenant:oid",
+        "appId": "cowork-client",
+        "deployment": "claude",
+        "request": {"model": "claude", "max_tokens": 1000},
+    })
+    assert reservation.status_code == 200
+    reservation_id = reservation.json()["reservationId"]
+    payload = {
+        "operationId": "claude-request",
+        "deployment": "claude",
+        "model": "claude-version",
+        "inputTokens": 600,
+        "outputTokens": 300,
+        "cacheWriteTokens": 100,
+        "cacheReadTokens": 200,
+        "status": 200,
+    }
+    first = client.post(f"/v1/reservations/{reservation_id}/settle", json=payload)
+    assert first.status_code == 200
+    assert first.json()["actualUsd"] == "0.003950"
+    assert first.json()["spendBreakdown"] == {
+        "input": "0.0012", "output": "0.0024", "cacheWrite": "0.00025", "cacheRead": "0.0001",
+    }
+    assert client.post(f"/v1/reservations/{reservation_id}/settle", json=payload).json() == first.json()
 
 
 def test_reserve_denies_amount_above_remaining_budget() -> None:
@@ -179,6 +243,26 @@ def test_budget_metrics_aggregate_current_team_users() -> None:
     assert marketing.allocated_usd == Decimal("0")
     assert len(report.users) == 2
     assert report.users[0].user_email == "one@example.com"
+
+
+def test_budget_metrics_include_legacy_consumption_as_unassigned() -> None:
+    container = FakeContainer()
+    ledger = CosmosLedger(container, monthly_limit_usd=Decimal("1.00"))
+    reservation = ledger.reserve(
+        "legacy-metrics",
+        "legacy-caller",
+        Decimal("0.25"),
+        {"userEmail": "legacy@example.com", "userName": "Legacy User"},
+    )
+    ledger.settle(reservation.reservation_id, Decimal("0.20"), {"inputTokens": 100})
+
+    report = ledger.get_budget_metrics()
+
+    assert len(report.users) == 1
+    assert report.users[0].team_role == "Unassigned"
+    assert report.users[0].spent_usd == Decimal("0.20")
+    assert report.teams[0].team_role == "Unassigned"
+    assert report.teams[0].spent_usd == Decimal("0.20")
 
 
 def test_set_budget_limit_preserves_usage_and_applies_immediately() -> None:

@@ -229,7 +229,6 @@ class CosmosLedger:
         documents = self._container.query_items(
             query=(
                 "SELECT * FROM c WHERE c.type = 'budget' "
-                "AND c.limitSource = 'team-policy' "
                 "AND ENDSWITH(c.partitionKey, @periodSuffix)"
             ),
             parameters=[{"name": "@periodSuffix", "value": f":{period}"}],
@@ -394,6 +393,7 @@ class CosmosLedger:
         return SettlementResponse(
             reservation_id=item["id"], status=item["status"], actual_usd=_decimal(item["actualUsd"]),
             released_usd=_decimal(item["releasedUsd"]), remaining_usd=remaining,
+            spend_breakdown=item.get("usage", {}).get("spendBreakdown"),
         )
 
     @staticmethod
@@ -426,7 +426,7 @@ class CosmosLedger:
             user_key=item.get("userKey", item["callerKey"]),
             user_email=item.get("userEmail", ""),
             user_name=item.get("userName", ""),
-            team_role=item["teamRole"],
+            team_role=item.get("teamRole") or "Unassigned",
             period=item["partitionKey"].rsplit(":", 1)[-1],
             allocated_usd=limit,
             spent_usd=spent,

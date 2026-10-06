@@ -86,6 +86,16 @@ def calculate_cost_usd(usage: TokenUsage, rates: PriceRates) -> Decimal:
     return cost.quantize(USD_QUANTUM, rounding=ROUND_CEILING)
 
 
+def cost_breakdown_usd(usage: TokenUsage, rates: PriceRates) -> dict[str, Decimal]:
+    unit = Decimal(TOKENS_PER_PRICE_UNIT)
+    return {
+        "input": Decimal(usage.input_tokens) * rates.input_usd_per_million / unit,
+        "output": Decimal(usage.output_tokens) * rates.output_usd_per_million / unit,
+        "cacheWrite": Decimal(usage.cache_write_tokens) * rates.cache_write_usd_per_million / unit,
+        "cacheRead": Decimal(usage.cache_read_tokens) * rates.cache_read_usd_per_million / unit,
+    }
+
+
 def calculate_reservation_usd(
     estimated_input_tokens: int, maximum_output_tokens: int, rates: PriceRates
 ) -> Decimal:

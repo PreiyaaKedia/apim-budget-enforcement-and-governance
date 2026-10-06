@@ -1,0 +1,23 @@
+FROM node:22-alpine AS frontend
+
+WORKDIR /web
+COPY package.json package-lock.json ./
+RUN npm ci
+
+FROM mcr.microsoft.com/azurelinux/base/python:3.12.14-1-azl3.0.20260909
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app ./app
+COPY analytics.py local_simulator.py prices.example.json ./
+COPY simulator_web ./simulator_web
+COPY --from=frontend /web/node_modules/@azure/msal-browser/lib/msal-browser.min.js ./simulator_web/msal-browser.min.js
+RUN mkdir -p /app/.local \
+    && chown -R 10001:0 /app \
+    && chmod -R g=u /app
+
+ENV HOME=/tmp
+USER 10001
+EXPOSE 8000
+CMD ["python3", "-m", "uvicorn", "local_simulator:app", "--host", "0.0.0.0", "--port", "8000"]

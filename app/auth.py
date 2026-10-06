@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from hmac import compare_digest
 
 import jwt
 from jwt import PyJWKClient
@@ -14,7 +13,9 @@ class EntraAuthMiddleware:
         self.tenant_id = os.environ.get("TENANT_ID", "")
         self.audience = os.environ.get("AUDIENCE", "")
         self.allowed_client_id = os.environ.get("ALLOWED_CLIENT_ID", "")
-        self.admin_api_key = os.environ.get("ADMIN_API_KEY", "")
+        self.admin_allowed_client_id = os.environ.get("ADMIN_ALLOWED_CLIENT_ID", "")
+        self.admin_allowed_principal_id = os.environ.get("ADMIN_ALLOWED_PRINCIPAL_ID", "")
+        self.admin_required_role = os.environ.get("ADMIN_REQUIRED_ROLE", "CostEnforcement.Admin")
         self.admin_auth_disabled = os.environ.get("ADMIN_AUTH_DISABLED", "false").lower() == "true"
         self.disabled = os.environ.get("AUTH_DISABLED", "false").lower() == "true"
         self.issuers = {
@@ -30,20 +31,14 @@ class EntraAuthMiddleware:
         if scope["type"] != "http" or scope.get("path") == "/health" or self.disabled or (is_admin and self.admin_auth_disabled):
             await self.app(scope, receive, send)
             return
-        if is_admin:
-            headers = {key.decode().lower(): value.decode() for key, value in scope["headers"]}
-            supplied_key = headers.get("x-admin-key", "")
-            if not self.admin_api_key:
-                await self._error(send, 503, "admin authentication is not configured")
-                return
-            if not supplied_key or not compare_digest(supplied_key, self.admin_api_key):
-                await self._error(send, 401, "invalid admin key")
-                return
-            await self.app(scope, receive, send)
-            return
         audience = self.audience
-        allowed_client_id = self.allowed_client_id
-        if not all((self.tenant_id, audience, allowed_client_id, self.jwks)):
+        if not all((self.tenant_id, audience, self.jwks)):
+            await self._error(send, 503, "authentication is not configured")
+            return
+        if is_admin and not (self.admin_allowed_client_id or self.admin_allowed_principal_id):
+            await self._error(send, 503, "admin authentication is not configured")
+            return
+        if not is_admin and not self.allowed_client_id:
             await self._error(send, 503, "authentication is not configured")
             return
 
@@ -64,7 +59,18 @@ class EntraAuthMiddleware:
             )
             if claims.get("iss") not in self.issuers:
                 raise jwt.InvalidIssuerError("unexpected issuer")
-            if claims.get("azp", claims.get("appid")) != allowed_client_id:
+            caller_client_id = claims.get("azp", claims.get("appid"))
+            if is_admin:
+                roles = claims.get("roles", [])
+                if isinstance(roles, str):
+                    roles = [roles]
+                if self.admin_required_role not in roles:
+                    raise jwt.InvalidTokenError("required admin role is missing")
+                if self.admin_allowed_client_id and caller_client_id != self.admin_allowed_client_id:
+                    raise jwt.InvalidTokenError("admin calling application is not allowed")
+                if self.admin_allowed_principal_id and claims.get("oid") != self.admin_allowed_principal_id:
+                    raise jwt.InvalidTokenError("admin calling principal is not allowed")
+            elif caller_client_id != self.allowed_client_id:
                 raise jwt.InvalidTokenError("calling application is not allowed")
         except jwt.PyJWTError:
             await self._error(send, 401, "invalid bearer token")
